@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {fileIndexAtLine, nextNavTarget, stepFileNav} from './fileNav';
+import {fileIndexAtLine, nextNavTarget, prevFileTarget, stepFileNav} from './fileNav';
 
 describe('fileIndexAtLine', () => {
     const tops = [100, 500, 900, 1400];
@@ -75,5 +75,53 @@ describe('stepFileNav', () => {
 
     it('starts from current when nothing is pending', () => {
         expect(stepFileNav({current: 2, pending: null}, 1, 10).pending).toBe(3);
+    });
+});
+
+describe('prevFileTarget', () => {
+    const VIEWPORT = 800;
+    const LINE = 100;
+
+    it('returns 0 when there are no files', () => {
+        expect(prevFileTarget([], LINE, VIEWPORT, null)).toBe(0);
+    });
+
+    it('goes to the start of the current file when deep inside it', () => {
+        // File 0 top is 2100px above the reading line (> one viewport).
+        expect(prevFileTarget([-2000, 300], LINE, VIEWPORT, null)).toBe(0);
+        // Deep inside file 1.
+        expect(prevFileTarget([0, -2000, 300], LINE, VIEWPORT, null)).toBe(1);
+    });
+
+    it('goes to the previous file when near the top of the current one', () => {
+        expect(prevFileTarget([0, 50, 300], LINE, VIEWPORT, null)).toBe(0);
+        expect(prevFileTarget([0, 500, 3000], LINE, VIEWPORT, null)).toBe(0);
+    });
+
+    it('stays on the first file when near its top', () => {
+        expect(prevFileTarget([0, 300], LINE, VIEWPORT, null)).toBe(0);
+        expect(prevFileTarget([50, 300], LINE, VIEWPORT, null)).toBe(0);
+    });
+
+    it('respects a pending target', () => {
+        // Pending file 2 is near the top -> previous file.
+        expect(prevFileTarget([0, -2000, 300, 3000], LINE, VIEWPORT, 2)).toBe(1);
+        // Pending file 2 is deep -> start of file 2.
+        expect(prevFileTarget([0, 0, -2000, 3000], LINE, VIEWPORT, 2)).toBe(2);
+        // Pending beyond the list clamps to the last file.
+        expect(prevFileTarget([0, 50, 300], LINE, VIEWPORT, 99)).toBe(1);
+    });
+
+    it('chains: start of a deep file first, then the previous file', () => {
+        const deepTops = [0, -2000, 5000];
+        const first = prevFileTarget(deepTops, LINE, VIEWPORT, null);
+        expect(first).toBe(1);
+        // After scrolling file 1 to the reading line.
+        const atStart = [0, LINE - 4, 5000];
+        expect(prevFileTarget(atStart, LINE, VIEWPORT, first)).toBe(0);
+    });
+
+    it('ignores the deep rule when the viewport height is unknown', () => {
+        expect(prevFileTarget([0, -2000, 300], LINE, 0, null)).toBe(0);
     });
 });

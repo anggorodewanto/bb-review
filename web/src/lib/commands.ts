@@ -99,7 +99,7 @@ export const COMMANDS: Command[] = [
     },
     {
         id: 'prev-file',
-        title: 'Previous file',
+        title: 'Previous file (or start of current file)',
         group: 'Navigation',
         keys: [['k']],
         when: onPr,

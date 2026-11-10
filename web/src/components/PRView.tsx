@@ -11,7 +11,7 @@ import {anchorForChange, commentCounts, groupComments} from '../lib/comments';
 import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHash} from '../lib/commentNav';
 import type {NavItem} from '../lib/commentNav';
 import {prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
-import {fileIndexAtLine, nextNavTarget} from '../lib/fileNav';
+import {fileIndexAtLine, nextNavTarget, prevFileTarget} from '../lib/fileNav';
 import type {DynamicCommand} from '../lib/commands';
 import {setCommandDetail} from '../lib/commandFeedback';
 import {lastInboxUrl} from '../lib/inboxUrl';
@@ -853,15 +853,25 @@ export function PRView() {
                         filesRef.current.length,
                     ),
                 ),
-            'prev-file': () =>
+            // `k` first goes to the start of a long file, then to the previous.
+            'prev-file': () => {
+                const list = filesRef.current;
+                if (list.length === 0) {
+                    return;
+                }
+                const tops = list.map((_entry, index) => {
+                    const el = fileRefs.current[index];
+                    return el ? el.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
+                });
                 scrollToFile(
-                    nextNavTarget(
-                        currentIndexRef.current,
-                        -1,
+                    prevFileTarget(
+                        tops,
+                        readingLine() + 2,
+                        window.innerHeight,
                         navTargetRef.current,
-                        filesRef.current.length,
                     ),
-                ),
+                );
+            },
             'next-hunk': () => goHunk(1),
             'prev-hunk': () => goHunk(-1),
             'next-line': () => goLine(1),
@@ -891,6 +901,7 @@ export function PRView() {
         }),
         [
             scrollToFile,
+            readingLine,
             goHunk,
             goLine,
             goComment,

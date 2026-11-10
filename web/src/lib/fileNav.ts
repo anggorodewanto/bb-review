@@ -37,6 +37,41 @@ export function nextNavTarget(
     return Math.min(count - 1, Math.max(0, base + delta));
 }
 
+/**
+ * Target for `k` (previous file).
+ *
+ * When the reading line is more than one viewport height below the top of the
+ * current file (the user is deep inside a long file), `k` first goes to the
+ * START of that file. Otherwise it goes to the previous file. A pending target
+ * (a scroll that has not settled yet) is used as the current file, so quick
+ * presses chain: start of file i, then i-1.
+ */
+export function prevFileTarget(
+    tops: ReadonlyArray<number>,
+    readingLine: number,
+    viewportHeight: number,
+    pendingTarget: number | null,
+): number {
+    if (tops.length === 0) {
+        return 0;
+    }
+    const spyIndex = Math.max(0, fileIndexAtLine(tops, readingLine));
+    const base =
+        pendingTarget === null
+            ? spyIndex
+            : Math.min(tops.length - 1, Math.max(0, pendingTarget));
+    const top = tops[base];
+    const deep =
+        viewportHeight > 0 &&
+        top !== undefined &&
+        Number.isFinite(top) &&
+        readingLine - top > viewportHeight;
+    if (deep) {
+        return base;
+    }
+    return Math.max(0, base - 1);
+}
+
 export type FileNavState = {
     /** Scroll-spy index (updated when the page settles). */
     current: number;
