@@ -187,6 +187,10 @@ export function PRView() {
     const navTargetRef = useRef<number | null>(null);
     const navLockRef = useRef(false);
     const navCorrectRef = useRef(false);
+    // scrollY where the last j/k navigation came to rest. While the page stays
+    // there, the scroll-spy keeps the navigated file as current; this matters
+    // at the bottom of the page, where short last files can't reach the top.
+    const navRestY = useRef<number | null>(null);
     const navSettleTimer = useRef<number | null>(null);
     const navHardTimer = useRef<number | null>(null);
     const navFrame = useRef<number | null>(null);
@@ -260,7 +264,10 @@ export function PRView() {
         if (target === null) {
             return;
         }
+        // Update the ref now: fast repeated presses run before React re-renders.
+        currentIndexRef.current = target;
         setCurrentIndex(target);
+        navRestY.current = window.scrollY;
         if (!navCorrectRef.current) {
             return;
         }
@@ -276,6 +283,7 @@ export function PRView() {
                 return;
             }
             window.scrollTo({top: window.scrollY + top - line, behavior: 'auto'});
+            navRestY.current = window.scrollY;
         });
     }, [clearNavTimers, readingLine]);
 
@@ -306,10 +314,19 @@ export function PRView() {
                 settleNavigation();
                 return;
             }
-            const behavior: ScrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
-            if (typeof el.scrollIntoView === 'function') {
-                el.scrollIntoView({behavior, block: 'start'});
+            // Already in place: no scroll (and no scrollend) will happen, so
+            // settle now instead of waiting for the 1.5s fallback.
+            if (Math.abs(el.getBoundingClientRect().top - readingLine()) <= 4) {
+                settleNavigation();
+                return;
             }
+            // Instant jump: keyboard navigation should feel immediate, and a
+            // smooth scroll races the scroll-spy (and is throttled in
+            // background windows).
+            if (typeof el.scrollIntoView === 'function') {
+                el.scrollIntoView({behavior: 'auto', block: 'start'});
+            }
+            settleNavigation();
         },
         [beginNavigation, readingLine, settleNavigation],
     );
@@ -327,11 +344,17 @@ export function PRView() {
         }
         navFrame.current = window.requestAnimationFrame(() => {
             navFrame.current = null;
+            if (navRestY.current !== null && Math.abs(window.scrollY - navRestY.current) < 2) {
+                return;
+            }
+            navRestY.current = null;
             const tops = filesRef.current.map((_entry, index) => {
                 const el = fileRefs.current[index];
                 return el ? el.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
             });
-            const index = fileIndexAtLine(tops, readingLine());
+            // +2px: scrollIntoView lands on fractional offsets (e.g. 64.4 vs a
+            // 64px line), which would otherwise count as the previous file.
+            const index = fileIndexAtLine(tops, readingLine() + 2);
             if (index >= 0) {
                 setCurrentIndex(index);
             }

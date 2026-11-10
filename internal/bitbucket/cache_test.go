@@ -2,8 +2,10 @@ package bitbucket
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -272,5 +274,17 @@ func TestDiffCacheDropsOnNewSourceCommit(t *testing.T) {
 	}
 	if got := fake.callCount("diff"); got != 3 {
 		t.Fatalf("diff calls after a push = %d, want 3", got)
+	}
+}
+
+func TestDetailCloneEncodesEmptySlicesAsArrays(t *testing.T) {
+	out, err := json.Marshal(PRDetail{}.clone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"builds":[]`, `"participants":[]`} {
+		if !strings.Contains(string(out), field) {
+			t.Fatalf("want %s in %s", field, out)
+		}
 	}
 }

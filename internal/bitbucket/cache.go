@@ -62,8 +62,10 @@ func newResponseCache(now func() time.Time) *responseCache {
 // must not be able to mutate the cached value.
 func (d PRDetail) clone() PRDetail {
 	out := d
-	out.Participants = append([]Participant(nil), d.Participants...)
-	out.Builds = append([]BuildStatus(nil), d.Builds...)
+	// Copy into non-nil slices: a nil slice encodes as JSON null and the
+	// frontend expects arrays.
+	out.Participants = append([]Participant{}, d.Participants...)
+	out.Builds = append([]BuildStatus{}, d.Builds...)
 	return out
 }
 

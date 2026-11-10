@@ -324,12 +324,17 @@ func (c *Client) PRDetail(ctx context.Context, repo Repo, id int) (PRDetail, err
 	}
 
 	builds := <-buildsCh
+	if detail.Builds == nil {
+		detail.Builds = []BuildStatus{}
+	}
 	if builds.err != nil {
 		c.log.Warn("commit statuses failed", "repo", repo.String(), "commit", detail.SourceCommit, "err", builds.err.Error())
 		c.responses.storeDetail(key, detail)
 		return detail, nil
 	}
-	detail.Builds = builds.builds
+	if builds.builds != nil {
+		detail.Builds = builds.builds
+	}
 	detail.BuildState = aggregateBuilds(builds.builds)
 	c.recordBuildState(repo, detail.SourceCommit, detail.BuildState)
 	c.responses.storeDetail(key, detail)

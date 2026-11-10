@@ -34,7 +34,8 @@ export function PRHeader({
     const description = useMemo(() => sanitizeHtml(pr.description_html), [pr.description_html]);
     const approved = pr.my_state === 'approved';
     const changes = pr.my_state === 'changes_requested';
-    const reviewers = pr.participants.filter((p) => p.role === 'REVIEWER');
+    const builds = pr.builds ?? [];
+    const reviewers = (pr.participants ?? []).filter((p) => p.role === 'REVIEWER');
 
     return (
         <header className="pr-head">
@@ -92,10 +93,10 @@ export function PRHeader({
 
             <div className="pr-status-row">
                 <div className="pr-builds">
-                    {pr.builds.length === 0 ? (
+                    {builds.length === 0 ? (
                         <BuildDot state={pr.build_state} />
                     ) : (
-                        pr.builds.map((build) =>
+                        builds.map((build) =>
                             build.url ? (
                                 <a
                                     key={build.key}
