@@ -15,6 +15,12 @@ PR prefix: `/api/prs/{ws}/{repo}/{id}`.
   port, plus `config.allowed_hosts`, e.g. the tailnet name `mybox.tail1234.ts.net`).
   Otherwise `421`. (DNS-rebinding guard.)
 - Server binds `127.0.0.1` only. Phone access is via `tailscale serve`.
+- Every response also carries `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer` and this CSP:
+
+  ```
+  default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+  ```
 
 ## Errors
 
@@ -77,14 +83,24 @@ type Draft = {
 };
 
 type ViewedState = { files: Record<string, string> }; // path -> hash of that file's diff text when marked viewed
+
+type PRRef = { workspace: string; repo: string; id: number };   // GET /api/resolve
 ```
+
+Pull request list responses carry three optional headers:
+
+| Header | Meaning |
+|---|---|
+| `X-BBR-Fetched-At` | RFC3339 timestamp of the data behind this list ("updated 30s ago") |
+| `X-BBR-Partial` | comma-separated repos (`repo` or `ws/repo`) that failed; the rest is still returned |
+| `X-BBR-Rate-Limited` | `1` when Bitbucket answered `429`; results may be partial/stale and the server is backing off |
 
 ## Endpoints
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/me` | | `User` |
-| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc |
+| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc. `reviewer`: auto-discovered recently updated repos ∪ `config.repos`, one query per repo. `author`: one workspace-wide query, no fan-out. Cached stale-while-revalidate, see headers above. |
 | GET | `{pr}` | | `PRDetail` |
 | GET | `{pr}/diff` | | `text/plain` unified git diff (Bitbucket `/diff`, redirects followed) |
 | GET | `{pr}/comments` | | `Comment[]` (all pages, oldest first) |
@@ -101,6 +117,7 @@ type ViewedState = { files: Record<string, string> }; // path -> hash of that fi
 | GET | `{pr}/viewed` | | `ViewedState` |
 | PUT | `{pr}/viewed` | `ViewedState` | `ViewedState` |
 | GET | `/api/file/{ws}/{repo}/{commit}/{path...}` | | `text/plain` raw file content at commit (for expanding diff context). `404` if missing. Files > 2 MB → `413`. |
+| GET | `/api/resolve?url=<bitbucket pr url>` | | `PRRef`. Accepts `https://bitbucket.org/{ws}/{repo}/pull-requests/{id}[/anything][?query][#frag]`; `400` for anything else. Pure parsing, no upstream call. |
 
 Anything not under `/api/` serves the embedded SPA (`index.html` fallback for client routes).
 
@@ -110,10 +127,21 @@ Anything not under `/api/` serves the embedded SPA (`index.html` fallback for cl
   (scopes: `read:user:bitbucket`, `read:pullrequest:bitbucket`, `write:pullrequest:bitbucket`,
   `read:repository:bitbucket`). App passwords are deprecated; don't support them.
 - `GET /2.0/user` → me.
-- PR list: there is no cross-repo "PRs I review" endpoint. For each configured repo,
-  `GET /2.0/repositories/{ws}/{repo}/pullrequests?state=OPEN&q=reviewers.uuid="{uuid}"` (role=reviewer)
-  or `q=author.uuid="{uuid}"` (role=author), `pagelen=50`, fetched concurrently (limit 8).
-  Add `fields=+values.participants` so `my_state`/`approvals` can be computed.
+- PR list, role=reviewer: there is no cross-repo "PRs I review" endpoint, so the server
+  first discovers active repos and then fans out (limit 8).
+  Discovery: `GET /2.0/repositories/{ws}?sort=-updated_on&pagelen=100&fields=next,values.slug,values.updated_on`,
+  paging only while `updated_on` is inside `active_days` (default 14). The result is
+  unioned with `config.repos` (deduplicated) and cached for `discovery_ttl` (default 10m).
+  Then for each repo:
+  `GET /2.0/repositories/{ws}/{repo}/pullrequests?state=OPEN&q=reviewers.uuid="{uuid}"`,
+  `pagelen=50`, `fields=+values.participants`.
+- PR list, role=author: one call,
+  `GET /2.0/workspaces/{ws}/pullrequests/{uuid}?state=OPEN&pagelen=50&fields=+values.participants`
+  (the uuid is URL-encoded, braces included). Pagination followed.
+- PR list caching: stale-while-revalidate. A copy younger than 60 s is served directly; an
+  older copy is served immediately and refreshed in a background goroutine (single-flight).
+  Only the first request blocks. On `429` the fan-out stops, partial results are kept,
+  `X-BBR-Rate-Limited: 1` is set and the server backs off for `Retry-After` (or 60 s).
 - Detail: `GET .../pullrequests/{id}`, `GET .../pullrequests/{id}/merge-base`,
   `GET /2.0/repositories/{ws}/{repo}/commit/{source_commit}/statuses`.
 - Diff: `GET .../pullrequests/{id}/diff` (302 → follow).

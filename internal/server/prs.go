@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 )
@@ -18,7 +19,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, me)
 }
 
-// handlePRList returns open pull requests across the configured repos.
+// handlePRList returns open pull requests for the reviewer or author role.
 func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 	role := strings.TrimSpace(r.URL.Query().Get("role"))
 	if role == "" {
@@ -34,14 +35,30 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 		state = "OPEN"
 	}
 
-	repos := s.cfg.RepoRefs()
-	result, err := s.bb.ListPRs(r.Context(), repos, role, state)
+	result, err := s.bb.ListPRs(r.Context(), bitbucket.ListOptions{
+		Role:       role,
+		State:      state,
+		Workspace:  s.cfg.Workspace,
+		Repos:      s.cfg.RepoRefs(),
+		ActiveDays: s.cfg.ActiveDaysOrDefault(),
+	})
 	if err != nil {
+		if bitbucket.IsRateLimited(err) {
+			w.Header().Set("X-BBR-Rate-Limited", "1")
+		}
 		s.writeUpstream(w, "pr list", err)
 		return
 	}
+
+	header := w.Header()
 	if len(result.Failed) > 0 {
-		w.Header().Set("X-BBR-Partial", strings.Join(result.Failed, ","))
+		header.Set("X-BBR-Partial", strings.Join(result.Failed, ","))
+	}
+	if !result.FetchedAt.IsZero() {
+		header.Set("X-BBR-Fetched-At", result.FetchedAt.UTC().Format(time.RFC3339))
+	}
+	if result.RateLimited {
+		header.Set("X-BBR-Rate-Limited", "1")
 	}
 	if result.PRs == nil {
 		result.PRs = []bitbucket.PRSummary{}
@@ -77,6 +94,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	defer body.Close()
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", "inline")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, body); err != nil {

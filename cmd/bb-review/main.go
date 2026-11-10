@@ -61,10 +61,11 @@ func run(logger *slog.Logger) error {
 	}
 
 	client := bitbucket.New(bitbucket.Options{
-		BaseURL: cfg.BaseURL,
-		Email:   cfg.Email,
-		Token:   cfg.Token,
-		Logger:  logger,
+		BaseURL:      cfg.BaseURL,
+		Email:        cfg.Email,
+		Token:        cfg.Token,
+		Logger:       logger,
+		DiscoveryTTL: cfg.DiscoveryTTLOrDefault(),
 	})
 
 	handler := server.New(server.Options{

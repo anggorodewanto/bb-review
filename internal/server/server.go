@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/me", s.handleMe)
+	mux.HandleFunc("GET /api/resolve", s.handleResolve)
 	mux.HandleFunc("GET /api/prs", s.handlePRList)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}", s.handlePRDetail)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}/diff", s.handleDiff)
@@ -138,11 +139,23 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 	})
 }
 
-// withSecurity enforces the CSRF (X-BBR) and DNS-rebinding (Host) guards.
-// CORS preflights are never answered: OPTIONS is not a safe method and browsers
-// cannot add X-BBR to a preflight, so it falls through to 403.
+// contentSecurityPolicy locks the SPA down to its own origin.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; " +
+	"connect-src 'self'; object-src 'none'; base-uri 'none'; " +
+	"frame-ancestors 'none'; form-action 'none'"
+
+// withSecurity sets the hardening headers, then enforces the CSRF (X-BBR) and
+// DNS-rebinding (Host) guards. CORS preflights are never answered: OPTIONS is not
+// a safe method and browsers cannot add X-BBR to a preflight, so it falls
+// through to 403.
 func (s *Server) withSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("Content-Security-Policy", contentSecurityPolicy)
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Referrer-Policy", "no-referrer")
+
 		if !s.hostAllowed(r.Host) {
 			writeError(w, http.StatusMisdirectedRequest, "host not allowed")
 			return

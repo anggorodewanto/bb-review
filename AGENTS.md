@@ -30,13 +30,21 @@ usable on a phone (via `tailscale serve`). A single Go binary embeds the React S
 ```json
 {
   "email": "you@example.com",
-  "token": "ATATT...",            // or env BB_REVIEW_TOKEN (env wins)
+  "token": "ATATT...",                        // or token_file, or env BB_REVIEW_TOKEN
+  "token_file": "~/.config/bb-review/token",  // optional, mode 0600
   "workspace": "myworkspace",
-  "repos": ["repo-a", "repo-b"],  // or "ws/repo" for another workspace
+  "repos": ["repo-a", "other/repo-b"],        // optional "always check" list ("repo" or "ws/repo")
   "listen": "127.0.0.1:7777",
-  "allowed_hosts": ["mybox.tail1234.ts.net"]
+  "allowed_hosts": ["mybox.tail1234.ts.net"],
+  "active_days": 14,                          // repo auto-discovery window
+  "discovery_ttl": "10m"                      // how long the discovered repo list is cached
 }
 ```
+
+Token precedence: `BB_REVIEW_TOKEN` env > `token` > `token_file` (whitespace trimmed).
+`repos` is optional: with it empty the reviewer list uses auto-discovered repos only
+(repos updated within `active_days`, unioned with `repos` when set). The author list uses
+the workspace-wide endpoint, so it never fans out per repo.
 
 State (drafts, viewed): `~/.local/share/bb-review/state.json`.
 

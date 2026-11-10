@@ -7,10 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, body string, mode os.FileMode) string {
 	t.Helper()
+	// Keep an ambient BB_REVIEW_TOKEN from changing token-precedence results.
+	t.Setenv(TokenEnv, "")
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -68,8 +71,8 @@ func TestLoadValidConfig(t *testing.T) {
 }
 
 func TestLoadEnvTokenWins(t *testing.T) {
-	t.Setenv(TokenEnv, "env-token")
 	path := writeConfig(t, validConfig, 0o600)
+	t.Setenv(TokenEnv, "env-token")
 	logger, _ := bufferLogger()
 
 	cfg, err := Load(path, logger)
@@ -101,7 +104,7 @@ func TestLoadMissingFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a validation error")
 	}
-	for _, field := range []string{"token", "workspace", "repos"} {
+	for _, field := range []string{"token", "workspace"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Fatalf("error %q does not mention %q", err, field)
 		}
@@ -173,5 +176,142 @@ func TestDefaultStateFile(t *testing.T) {
 	}
 	if !strings.Contains(cfg.StateFile(), filepath.Join(".local", "share", "bb-review", "state.json")) {
 		t.Fatalf("state file = %q", cfg.StateFile())
+	}
+}
+
+func TestReposAreOptional(t *testing.T) {
+	path := writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws"}`, 0o600)
+	logger, _ := bufferLogger()
+
+	cfg, err := Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load without repos: %v", err)
+	}
+	if got := cfg.RepoRefs(); len(got) != 0 {
+		t.Fatalf("repos = %+v, want none", got)
+	}
+}
+
+func TestTokenPrecedence(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("  file-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		config string
+		env    string
+		want   string
+	}{
+		{
+			name:   "env beats token and token_file",
+			config: `{"email":"me@example.com","token":"file-token-value","token_file":"` + tokenFile + `","workspace":"ws"}`,
+			env:    "env-token",
+			want:   "env-token",
+		},
+		{
+			name:   "token beats token_file",
+			config: `{"email":"me@example.com","token":"file-token-value","token_file":"` + tokenFile + `","workspace":"ws"}`,
+			want:   "file-token-value",
+		},
+		{
+			name:   "token_file is trimmed",
+			config: `{"email":"me@example.com","token_file":"` + tokenFile + `","workspace":"ws"}`,
+			want:   "file-token",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.config, 0o600)
+			t.Setenv(TokenEnv, tc.env)
+			logger, _ := bufferLogger()
+
+			cfg, err := Load(path, logger)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Token != tc.want {
+				t.Fatalf("token = %q, want %q", cfg.Token, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenFileMissingIsAnError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	path := writeConfig(t, `{"email":"me@example.com","token_file":"`+missing+`","workspace":"ws"}`, 0o600)
+	logger, _ := bufferLogger()
+
+	_, err := Load(path, logger)
+	if err == nil {
+		t.Fatal("expected an error for a missing token_file")
+	}
+	if !strings.Contains(err.Error(), "token_file") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTokenFileLoosePermissionsWarn(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("file-token"), 0o644); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	if err := os.Chmod(tokenFile, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	path := writeConfig(t, `{"email":"me@example.com","token_file":"`+tokenFile+`","workspace":"ws"}`, 0o600)
+	logger, buf := bufferLogger()
+
+	cfg, err := Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Token != "file-token" {
+		t.Fatalf("token = %q", cfg.Token)
+	}
+	if !strings.Contains(buf.String(), "token_file permissions") {
+		t.Fatalf("expected a token_file warning, got %q", buf.String())
+	}
+}
+
+func TestActiveDaysAndDiscoveryTTL(t *testing.T) {
+	path := writeConfig(t, validConfig, 0o600)
+	logger, _ := bufferLogger()
+	cfg, err := Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ActiveDaysOrDefault(); got != DefaultActiveDays {
+		t.Fatalf("active days = %d, want default %d", got, DefaultActiveDays)
+	}
+	if got := cfg.DiscoveryTTLOrDefault(); got != DefaultDiscoveryTTL {
+		t.Fatalf("discovery ttl = %v, want default %v", got, DefaultDiscoveryTTL)
+	}
+
+	path = writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","active_days":3,"discovery_ttl":"90s"}`, 0o600)
+	cfg, err = Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ActiveDaysOrDefault(); got != 3 {
+		t.Fatalf("active days = %d, want 3", got)
+	}
+	if got := cfg.DiscoveryTTLOrDefault(); got != 90*time.Second {
+		t.Fatalf("discovery ttl = %v, want 90s", got)
+	}
+}
+
+func TestInvalidDiscoverySettings(t *testing.T) {
+	logger, _ := bufferLogger()
+
+	path := writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","discovery_ttl":"soon"}`, 0o600)
+	if _, err := Load(path, logger); err == nil {
+		t.Fatal("expected an error for a bad discovery_ttl")
+	}
+
+	path = writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","active_days":-2}`, 0o600)
+	if _, err := Load(path, logger); err == nil {
+		t.Fatal("expected an error for a negative active_days")
 	}
 }

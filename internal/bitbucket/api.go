@@ -1,8 +1,11 @@
 package bitbucket
 
 import (
+	"encoding/json"
 	"html"
+	"net/url"
 	"strings"
+	"time"
 )
 
 // apiUser is the Bitbucket user schema.
@@ -48,6 +51,42 @@ type apiBranchRef struct {
 	Commit struct {
 		Hash string `json:"hash"`
 	} `json:"commit"`
+	Repository apiRepoRef `json:"repository"`
+}
+
+// apiRepoRef identifies the repository a pull request belongs to.
+type apiRepoRef struct {
+	FullName  string `json:"full_name"` // "workspace/repo"
+	Slug      string `json:"slug"`
+	Workspace struct {
+		Slug string `json:"slug"`
+	} `json:"workspace"`
+}
+
+// apiRepo is one entry of the workspace repository listing.
+type apiRepo struct {
+	Slug      string `json:"slug"`
+	UpdatedOn bbTime `json:"updated_on"`
+}
+
+// bbTime is a tolerant RFC3339 timestamp: a value that does not parse decodes to
+// the zero time instead of failing the whole response.
+type bbTime struct {
+	time.Time
+}
+
+// UnmarshalJSON parses an RFC3339 string, ignoring anything else.
+func (t *bbTime) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil
+	}
+	t.Time = parsed
+	return nil
 }
 
 // apiPR is the Bitbucket pull request schema (only the fields we read).
@@ -108,6 +147,39 @@ func participantsOf(participants []apiParticipant) []Participant {
 		})
 	}
 	return out
+}
+
+// repoFromPR recovers the repository a pull request belongs to. The workspace PR
+// listing does not always include it, so the HTML link is used as a fallback.
+func repoFromPR(a apiPR, fallback Repo) Repo {
+	if full := strings.TrimSpace(a.Destination.Repository.FullName); strings.Contains(full, "/") {
+		parts := strings.SplitN(full, "/", 2)
+		return Repo{Workspace: parts[0], Repo: parts[1]}
+	}
+	if ws := strings.TrimSpace(a.Destination.Repository.Workspace.Slug); ws != "" {
+		if slug := strings.TrimSpace(a.Destination.Repository.Slug); slug != "" {
+			return Repo{Workspace: ws, Repo: slug}
+		}
+	}
+	if href := a.Links.HTML.Href; href != "" {
+		if repo, ok := repoFromHTMLURL(href); ok {
+			return repo
+		}
+	}
+	return fallback
+}
+
+// repoFromHTMLURL extracts "ws/repo" from https://bitbucket.org/ws/repo/pull-requests/1.
+func repoFromHTMLURL(href string) (Repo, bool) {
+	parsed, err := url.Parse(href)
+	if err != nil {
+		return Repo{}, false
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+		return Repo{}, false
+	}
+	return Repo{Workspace: segments[0], Repo: segments[1]}, true
 }
 
 func (a apiPR) toSummary(repo Repo, meUUID string) PRSummary {
