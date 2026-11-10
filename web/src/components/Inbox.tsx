@@ -11,6 +11,8 @@ import {Avatar, BuildDot, EmptyState, ErrorState, ReviewBadge, Skeleton, Spinner
 type Role = 'reviewer' | 'author';
 
 const REFRESH_TICK_MS = 10_000;
+const SCAN_POLL_MS = 3_000;
+export const SCAN_SETTLE_MS = 2_000;
 
 export function Inbox() {
     const [params, setParams] = useSearchParams();
@@ -25,7 +27,8 @@ export function Inbox() {
     const listQuery = useQuery({
         queryKey: ['prs', role],
         queryFn: () => api.listPRs(role),
-        refetchInterval: 60_000,
+        // Poll quickly while the backend is still sweeping repos, then relax.
+        refetchInterval: (query) => (query.state.data?.scanning ? SCAN_POLL_MS : 60_000),
         refetchOnWindowFocus: true,
     });
     const meQuery = useQuery({
@@ -41,8 +44,12 @@ export function Inbox() {
         },
     });
 
+    const [manualRefreshing, setManualRefreshing] = useState(false);
+    const [refreshError, setRefreshError] = useState<string | null>(null);
+
     const prs = listQuery.data?.data ?? [];
     const fetchedAt = listQuery.data?.fetchedAt ?? null;
+    const scanning = listQuery.data?.scanning ?? null;
     const freshness = fetchedAt ? relativeAgeLong(fetchedAt, now) : '';
     const filtered = useMemo(
         () =>
@@ -118,6 +125,29 @@ export function Inbox() {
             return;
         }
         setParams(next === 'author' ? {role: 'author'} : {}, {replace: true});
+    }
+
+    async function refreshList() {
+        if (manualRefreshing) {
+            return;
+        }
+        setManualRefreshing(true);
+        setRefreshError(null);
+        // On "To review", kick a full rescan first and give it a moment to
+        // produce results. Still refetch if the scan request fails.
+        if (role === 'reviewer') {
+            try {
+                await api.scanPRs();
+                await sleep(SCAN_SETTLE_MS);
+            } catch (err) {
+                setRefreshError(`Rescan failed: ${messageOf(err)}`);
+            }
+        }
+        try {
+            await listQuery.refetch();
+        } finally {
+            setManualRefreshing(false);
+        }
     }
 
     const resolveError = inputError ?? (resolveMutation.isError ? messageOf(resolveMutation.error) : null);
@@ -201,11 +231,11 @@ export function Inbox() {
                     <button
                         type="button"
                         className="btn btn-small refresh-btn"
-                        onClick={() => void listQuery.refetch()}
-                        disabled={listQuery.isFetching}
+                        onClick={() => void refreshList()}
+                        disabled={manualRefreshing}
                         aria-label="Refresh pull request list"
                     >
-                        {listQuery.isFetching ? <Spinner label="Refreshing" /> : null}
+                        {manualRefreshing ? <Spinner label="Refreshing" /> : null}
                         Refresh
                     </button>
                 </div>
@@ -219,6 +249,14 @@ export function Inbox() {
                     aria-label="Filter pull requests"
                 />
             </div>
+
+            {refreshError ? (
+                <p className="form-error" role="alert">
+                    {refreshError}
+                </p>
+            ) : null}
+
+            {scanning ? <ScanProgress scanning={scanning} /> : null}
 
             {listQuery.data?.rateLimited ? (
                 <div className="info-banner" role="status">
@@ -320,4 +358,52 @@ function PRRow({pr}: {pr: PRSummary}) {
 
 function messageOf(error: unknown): string {
     return error instanceof Error ? error.message : 'Could not load pull requests';
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+    });
+}
+
+function parseScanProgress(scanning: string): {done: number; total: number} | null {
+    const match = /^(\d+)\s*\/\s*(\d+)$/.exec(scanning.trim());
+    if (!match) {
+        return null;
+    }
+    const done = Number(match[1]);
+    const total = Number(match[2]);
+    if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) {
+        return null;
+    }
+    return {done: Math.min(done, total), total};
+}
+
+function ScanProgress({scanning}: {scanning: string}) {
+    const parsed = parseScanProgress(scanning);
+    const pct = parsed ? Math.round((parsed.done / parsed.total) * 100) : null;
+
+    return (
+        <div
+            className={`scan-progress${parsed ? '' : ' is-indeterminate'}`}
+            role="status"
+            aria-live="polite"
+        >
+            <div className="scan-progress-head">
+                <span className="scan-progress-label">Scanning repos {scanning}</span>
+                {pct !== null ? <span className="scan-progress-pct">{pct}%</span> : null}
+            </div>
+            <div
+                className="scan-track"
+                role="progressbar"
+                aria-label="Repository scan progress"
+                aria-valuemin={0}
+                aria-valuemax={parsed?.total}
+                aria-valuenow={parsed?.done}
+                aria-valuetext={scanning}
+            >
+                <div className="scan-fill" style={pct === null ? undefined : {width: `${pct}%`}} />
+            </div>
+        </div>
+    );
 }

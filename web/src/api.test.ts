@@ -138,7 +138,15 @@ describe('api responses', () => {
             partial: false,
             fetchedAt,
             rateLimited: true,
+            scanning: null,
         });
+    });
+
+    it('reports the X-BBR-Scanning sweep progress', async () => {
+        fetchMock.mockResolvedValueOnce(
+            respond([], {headers: {'X-BBR-Scanning': '120/337', 'content-type': 'application/json'}}),
+        );
+        await expect(api.listPRs('reviewer')).resolves.toMatchObject({scanning: '120/337'});
     });
 
     it('defaults fetchedAt to null and rateLimited to false', async () => {
@@ -148,6 +156,31 @@ describe('api responses', () => {
             partial: false,
             fetchedAt: null,
             rateLimited: false,
+            scanning: null,
+        });
+    });
+
+    it('triggers a rescan with POST /api/scan', async () => {
+        fetchMock.mockResolvedValueOnce(respond(undefined, {status: 204}));
+        await expect(api.scanPRs()).resolves.toBeUndefined();
+        const {url, init} = lastCall();
+        expect(url).toBe('/api/scan');
+        expect(init.method).toBe('POST');
+        expect(headerOf(init, 'X-BBR')).toBe('1');
+        expect(init.body).toBeUndefined();
+    });
+
+    it('surfaces a scan failure', async () => {
+        fetchMock.mockResolvedValueOnce(
+            respond(
+                {error: 'scan already running', status: 409},
+                {status: 409, headers: {'content-type': 'application/json'}},
+            ),
+        );
+        await expect(api.scanPRs()).rejects.toMatchObject({
+            name: 'ApiError',
+            message: 'scan already running',
+            status: 409,
         });
     });
 

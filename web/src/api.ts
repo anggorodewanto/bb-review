@@ -33,6 +33,8 @@ export type ApiResponse<T> = {
     fetchedAt: string | null;
     /** True when the server answered with `X-BBR-Rate-Limited: 1`. */
     rateLimited: boolean;
+    /** `<done>/<total>` from `X-BBR-Scanning` while the first repo sweep runs. */
+    scanning: string | null;
 };
 
 const enc = (value: string | number) => encodeURIComponent(String(value));
@@ -68,6 +70,8 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
     const partial = res.headers.get('X-BBR-Partial') !== null;
     const fetchedAt = res.headers.get('X-BBR-Fetched-At');
     const rateLimited = res.headers.get('X-BBR-Rate-Limited') !== null;
+    const scanningHeader = res.headers.get('X-BBR-Scanning');
+    const scanning = scanningHeader && scanningHeader.trim() ? scanningHeader.trim() : null;
 
     if (!res.ok) {
         let message = `${res.status} ${res.statusText || 'request failed'}`;
@@ -82,7 +86,7 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
         throw new ApiError(message, res.status);
     }
 
-    const meta = {partial, fetchedAt, rateLimited};
+    const meta = {partial, fetchedAt, rateLimited, scanning};
 
     if (res.status === 204) {
         return {data: undefined as T, ...meta};
@@ -114,6 +118,11 @@ export async function listPRs(role: 'reviewer' | 'author'): Promise<ApiResponse<
 /** Turn a bitbucket.org pull request URL into workspace/repo/id (backend validates it). */
 export async function resolvePR(url: string): Promise<PRRef> {
     return (await request<PRRef>('GET', `${BASE}/resolve?url=${enc(url)}`)).data;
+}
+
+/** Ask the backend to start an immediate rescan of every configured repo. */
+export async function scanPRs(): Promise<void> {
+    await request<void>('POST', `${BASE}/scan`);
 }
 
 // --- pull request -----------------------------------------------------------

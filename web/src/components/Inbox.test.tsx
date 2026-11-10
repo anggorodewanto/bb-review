@@ -1,8 +1,8 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {MemoryRouter, Route, Routes} from 'react-router-dom';
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
-import {Inbox} from './Inbox';
+import {Inbox, SCAN_SETTLE_MS} from './Inbox';
 import type {PRSummary, User} from '../types';
 
 const USER: User = {
@@ -59,22 +59,29 @@ const PR_URL = 'https://bitbucket.org/ws/repo/pull-requests/5';
 
 let prHeaders: Record<string, string>;
 let prsCalls: number;
+let scanCalls: number;
 let resolveCalls: string[];
 
 beforeEach(() => {
     prHeaders = {};
     prsCalls = 0;
+    scanCalls = 0;
     resolveCalls = [];
     vi.stubGlobal(
         'fetch',
-        vi.fn(async (input: RequestInfo | URL) => {
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
             const url = String(input);
+            const method = init?.method ?? 'GET';
             if (url.startsWith('/api/me')) {
                 return fakeResponse({body: USER});
             }
             if (url.startsWith('/api/prs?')) {
                 prsCalls += 1;
                 return fakeResponse({body: [SUMMARY], headers: prHeaders});
+            }
+            if (url === '/api/scan' && method === 'POST') {
+                scanCalls += 1;
+                return fakeResponse({body: {}, status: 202});
             }
             if (url.startsWith('/api/resolve?')) {
                 resolveCalls.push(url);
@@ -89,14 +96,14 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
-function renderInbox() {
+function renderInbox(path = '/') {
     const client = new QueryClient({
         defaultOptions: {queries: {retry: false, gcTime: 0}},
     });
     return render(
         <QueryClientProvider client={client}>
             <MemoryRouter
-                initialEntries={['/']}
+                initialEntries={[path]}
                 future={{v7_startTransition: true, v7_relativeSplatPath: true}}
             >
                 <Routes>
@@ -123,12 +130,63 @@ describe('Inbox freshness', () => {
         expect(await screen.findByText(/rate limiting requests/i)).toBeInTheDocument();
     });
 
-    it('refreshes manually', async () => {
-        renderInbox();
+    it('scans then refetches on the To-review tab', async () => {
+        vi.useFakeTimers({shouldAdvanceTime: true});
+        try {
+            renderInbox();
+            await screen.findByText('Improve the diff viewer');
+            expect(prsCalls).toBe(1);
+            fireEvent.click(screen.getByRole('button', {name: 'Refresh pull request list'}));
+            await waitFor(() => expect(scanCalls).toBe(1));
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(SCAN_SETTLE_MS + 50);
+            });
+            await waitFor(() => expect(prsCalls).toBe(2));
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('refetches directly on the Mine tab without scanning', async () => {
+        renderInbox('/?role=author');
         await screen.findByText('Improve the diff viewer');
-        expect(prsCalls).toBe(1);
         fireEvent.click(screen.getByRole('button', {name: 'Refresh pull request list'}));
         await waitFor(() => expect(prsCalls).toBe(2));
+        expect(scanCalls).toBe(0);
+    });
+});
+
+describe('Inbox scanning progress', () => {
+    it('shows a slim progress bar from X-BBR-Scanning', async () => {
+        prHeaders = {'X-BBR-Scanning': '120/337'};
+        renderInbox();
+        expect(await screen.findByText('Scanning repos 120/337')).toBeInTheDocument();
+        const bar = screen.getByRole('progressbar', {name: 'Repository scan progress'});
+        expect(bar).toHaveAttribute('aria-valuenow', '120');
+        expect(bar).toHaveAttribute('aria-valuemax', '337');
+    });
+
+    it('polls every 3s while scanning', async () => {
+        prHeaders = {'X-BBR-Scanning': '1/10'};
+        vi.useFakeTimers({shouldAdvanceTime: true});
+        try {
+            renderInbox();
+            await screen.findByText(/Scanning repos/);
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(3_200);
+            });
+            await waitFor(() => expect(prsCalls).toBeGreaterThanOrEqual(2));
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps a malformed scan header visible but indeterminate', async () => {
+        prHeaders = {'X-BBR-Scanning': 'starting'};
+        renderInbox();
+        expect(await screen.findByText('Scanning repos starting')).toBeInTheDocument();
+        const bar = screen.getByRole('progressbar', {name: 'Repository scan progress'});
+        expect(bar).not.toHaveAttribute('aria-valuenow');
     });
 });
 
