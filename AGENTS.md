@@ -38,7 +38,9 @@ usable on a phone (via `tailscale serve`). A single Go binary embeds the React S
   "allowed_hosts": ["mybox.tail1234.ts.net"],
   "active_days": 14,                          // repo auto-discovery window
   "scan_interval": "60s",                     // reviewer scan tick
-  "full_sweep_interval": "6h"                 // re-query every active repo this often
+  "full_sweep_interval": "6h",                // re-query every active repo this often
+  "hot_interval": "5m",                       // re-check a repo with open review PRs this often
+  "request_budget": 800                       // upstream requests/hour ceiling
 }
 ```
 
@@ -48,10 +50,15 @@ and quotes; `#` comments and blank lines are ignored).
 
 `repos` is optional: it is an "always check" list. The reviewer list is maintained by an
 incremental scanner (`internal/scanner`): each tick (default 60 s) re-reads discovery and
-queries only new/changed/hot repos plus `repos`; a full sweep of every active repo happens
-every `full_sweep_interval` (default 6 h). Requests are served from scanner state, which is
-persisted in the state file under `"scanner"`. `POST /api/scan` forces a tick (debounced 10 s).
-The author list uses the workspace-wide endpoint, so it never fans out per repo.
+queries only new/changed repos, hot repos whose `hot_interval` (default 5 min) elapsed, and
+`repos`; a full sweep of every active repo happens every `full_sweep_interval` (default 6 h).
+The client counts upstream requests over a rolling hour; when the count exceeds
+`request_budget` (default 800) a tick skips hot re-checks and full sweeps. List rows get
+`build_state` from a per-commit cache (terminal states kept, `INPROGRESS`/`NONE` refreshed at
+most every 2 min). Requests are served from scanner state, which is persisted in the state
+file under `"scanner"`. `POST /api/scan` forces a tick (debounced 10 s); `GET /api/stats`
+reports `upstream_last_hour` and scanner health. The author list uses the workspace-wide
+endpoint, so it never fans out per repo.
 
 State (drafts, viewed): `~/.local/share/bb-review/state.json`.
 

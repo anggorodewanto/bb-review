@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
+	"github.com/anggorodewanto/bb-review/internal/scanner"
 )
 
 // handleMe returns the authenticated user.
@@ -88,7 +89,28 @@ func (s *Server) writeReviewerPRList(w http.ResponseWriter, r *http.Request) {
 	if snapshot.PRs == nil {
 		snapshot.PRs = []bitbucket.PRSummary{}
 	}
+	// Build states come from the client cache; only misses cost a request, and
+	// none wait longer than the list budget.
+	s.bb.FillBuildStates(r.Context(), snapshot.PRs, bitbucket.DefaultBuildBudget)
 	writeJSON(w, http.StatusOK, snapshot.PRs)
+}
+
+// handleStats reports upstream request volume and scanner health.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	resp := statsResponse{}
+	if s.bb != nil {
+		resp.UpstreamLastHour = s.bb.RequestsLastHour()
+	}
+	if s.scanner != nil {
+		resp.Scanner = s.scanner.Stats()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statsResponse is GET /api/stats.
+type statsResponse struct {
+	UpstreamLastHour int           `json:"upstream_last_hour"`
+	Scanner          scanner.Stats `json:"scanner"`
 }
 
 // handleScan triggers an immediate scan tick. Debounced by the scanner itself.

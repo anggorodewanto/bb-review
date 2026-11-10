@@ -291,7 +291,9 @@ func newTestScanner(t *testing.T, f *fakeBB, st *store.Store, clock *fakeClock) 
 		ActiveDays:        14,
 		ScanInterval:      time.Minute,
 		FullSweepInterval: 6 * time.Hour,
-		Now:               clock.Now,
+		// A short hot interval keeps these tests independent of the 5m default.
+		HotInterval: time.Minute,
+		Now:         clock.Now,
 	})
 }
 
@@ -387,7 +389,9 @@ func TestSecondTickQueriesOnlyChangedAndHotRepos(t *testing.T) {
 		t.Fatalf("repo-c queried %d times, want 2 (changed)", got)
 	}
 
-	// A third tick with nothing changed queries only the hot repos (b and c).
+	// A third tick after the hot interval, with nothing changed, queries only the
+	// hot repos (b and c).
+	clock.Advance(61 * time.Second)
 	if err := sc.Tick(context.Background()); err != nil {
 		t.Fatalf("third Tick: %v", err)
 	}
@@ -399,6 +403,138 @@ func TestSecondTickQueriesOnlyChangedAndHotRepos(t *testing.T) {
 	}
 	if got := f.listCallCount("repo-a"); got != 1 {
 		t.Fatalf("repo-a queried %d times, want 1 (unchanged, not hot)", got)
+	}
+}
+
+func TestHotReposFollowHotInterval(t *testing.T) {
+	f := newFakeBB(t, reps("repo-a", "repo-b")...)
+	f.setPRs("repo-a", 1, "a") // hot
+	f.setPRs("repo-b", 0, "")  // idle
+	st, _ := newTestStore(t)
+	clock := newFakeClock()
+	sc := New(Options{
+		Client:            f.client(),
+		Store:             st,
+		Logger:            discardLogger(),
+		Workspace:         "ws",
+		ActiveDays:        14,
+		ScanInterval:      time.Minute,
+		FullSweepInterval: 6 * time.Hour,
+		HotInterval:       5 * time.Minute,
+		Now:               clock.Now,
+	})
+
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+
+	// Still inside the hot interval: the hot repo is not re-queried.
+	clock.Advance(61 * time.Second)
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if got := f.listCallCount("repo-a"); got != 1 {
+		t.Fatalf("hot repo queried %d times, want 1 inside hot_interval", got)
+	}
+
+	// Once hot_interval elapsed the hot repo is re-queried, the idle one is not.
+	clock.Advance(5 * time.Minute)
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("third Tick: %v", err)
+	}
+	if got := f.listCallCount("repo-a"); got != 2 {
+		t.Fatalf("hot repo queried %d times, want 2 after hot_interval", got)
+	}
+	if got := f.listCallCount("repo-b"); got != 1 {
+		t.Fatalf("idle repo queried %d times, want 1", got)
+	}
+}
+
+func TestRequestBudgetSkipsHotChecksAndFullSweep(t *testing.T) {
+	f := newFakeBB(t, reps("repo-a", "repo-b")...)
+	f.setPRs("repo-a", 1, "a") // hot
+	f.setPRs("repo-b", 0, "")
+	st, _ := newTestStore(t)
+	clock := newFakeClock()
+	sc := New(Options{
+		Client:            f.client(),
+		Store:             st,
+		Logger:            discardLogger(),
+		Workspace:         "ws",
+		ActiveDays:        14,
+		ScanInterval:      time.Minute,
+		FullSweepInterval: 6 * time.Hour,
+		HotInterval:       30 * time.Second,
+		// The first tick already spends more than this.
+		RequestBudget: 1,
+		Now:           clock.Now,
+	})
+
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	firstSweepAt := sc.Stats().LastFullSweepAt
+	if firstSweepAt == "" {
+		t.Fatal("the first tick did not record a full sweep")
+	}
+
+	// Both a full sweep and a hot re-check would be due, but the budget is spent.
+	clock.Advance(6*time.Hour + time.Minute)
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if got := f.listCallCount("repo-a"); got != 1 {
+		t.Fatalf("hot repo queried %d times, want 1 (skipped over budget)", got)
+	}
+	if got := f.listCallCount("repo-b"); got != 1 {
+		t.Fatalf("idle repo queried %d times, want 1 (full sweep skipped)", got)
+	}
+	if got := sc.Stats().LastFullSweepAt; got != firstSweepAt {
+		t.Fatalf("LastFullSweepAt = %q, want the unchanged %q", got, firstSweepAt)
+	}
+
+	// A changed repo is essential and still gets queried.
+	f.setUpdatedOn("repo-b", time.Now().Add(-time.Minute))
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("third Tick: %v", err)
+	}
+	if got := f.listCallCount("repo-b"); got != 2 {
+		t.Fatalf("changed repo queried %d times, want 2", got)
+	}
+	if got := f.listCallCount("repo-a"); got != 1 {
+		t.Fatalf("hot repo queried %d times, want 1 (still over budget)", got)
+	}
+}
+
+func TestStatsReportsTrackedAndHotRepos(t *testing.T) {
+	f := newFakeBB(t, reps("repo-a", "repo-b", "repo-c")...)
+	f.setPRs("repo-a", 2, "a")
+	f.setPRs("repo-b", 0, "")
+	f.setPRs("repo-c", 1, "c")
+	st, _ := newTestStore(t)
+	clock := newFakeClock()
+	sc := newTestScanner(t, f, st, clock)
+
+	before := sc.Stats()
+	if before.ReposTracked != 0 || before.HotRepos != 0 || before.LastTickAt != "" {
+		t.Fatalf("stats before the first tick = %+v", before)
+	}
+
+	if err := sc.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	stats := sc.Stats()
+	if stats.ReposTracked != 3 {
+		t.Fatalf("ReposTracked = %d, want 3", stats.ReposTracked)
+	}
+	if stats.HotRepos != 2 {
+		t.Fatalf("HotRepos = %d, want 2", stats.HotRepos)
+	}
+	if stats.LastTickAt == "" || stats.LastFullSweepAt == "" {
+		t.Fatalf("timestamps = %+v", stats)
+	}
+	if stats.RateLimited {
+		t.Fatal("RateLimited = true after a clean tick")
 	}
 }
 

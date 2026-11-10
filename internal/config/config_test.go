@@ -396,3 +396,44 @@ func TestInvalidScanIntervals(t *testing.T) {
 		}
 	}
 }
+
+func TestHotIntervalAndRequestBudget(t *testing.T) {
+	logger, _ := bufferLogger()
+	path := writeConfig(t, validConfig, 0o600)
+	cfg, err := Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.HotIntervalOrDefault(); got != DefaultHotInterval {
+		t.Fatalf("hot interval = %v, want %v", got, DefaultHotInterval)
+	}
+	if got := cfg.RequestBudgetOrDefault(); got != DefaultRequestBudget {
+		t.Fatalf("request budget = %d, want %d", got, DefaultRequestBudget)
+	}
+
+	path = writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","hot_interval":"90s","request_budget":400}`, 0o600)
+	cfg, err = Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.HotIntervalOrDefault(); got != 90*time.Second {
+		t.Fatalf("hot interval = %v, want 90s", got)
+	}
+	if got := cfg.RequestBudgetOrDefault(); got != 400 {
+		t.Fatalf("request budget = %d, want 400", got)
+	}
+}
+
+func TestInvalidHotIntervalAndBudget(t *testing.T) {
+	logger, _ := bufferLogger()
+	for _, hot := range []string{"soon", "0s", "-5m"} {
+		path := writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","hot_interval":"`+hot+`"}`, 0o600)
+		if _, err := Load(path, logger); err == nil {
+			t.Fatalf("expected an error for hot_interval=%q", hot)
+		}
+	}
+	path := writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","request_budget":-1}`, 0o600)
+	if _, err := Load(path, logger); err == nil {
+		t.Fatal("expected an error for a negative request_budget")
+	}
+}

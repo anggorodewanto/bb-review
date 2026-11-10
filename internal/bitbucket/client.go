@@ -22,8 +22,6 @@ const (
 	DefaultBaseURL = "https://api.bitbucket.org"
 	// DefaultTimeout bounds a single upstream HTTP call.
 	DefaultTimeout = 30 * time.Second
-	// DefaultConcurrency bounds concurrent upstream calls per batch.
-	DefaultConcurrency = 8
 
 	// DefaultActiveDays is the repo-discovery window in days.
 	DefaultActiveDays = 14
@@ -47,6 +45,8 @@ type Options struct {
 	HTTPClient *http.Client
 	// Logger receives non-fatal warnings about partial failures.
 	Logger *slog.Logger
+	// Now is the clock, injectable for tests (request accounting and cache TTLs).
+	Now func() time.Time
 }
 
 // Client is a Bitbucket Cloud REST 2.0 client. It is safe for concurrent use.
@@ -56,12 +56,18 @@ type Client struct {
 	token   string
 	hc      *http.Client
 	log     *slog.Logger
+	now     func() time.Time
 
 	meMu sync.Mutex
 	me   *User
 
 	cacheMu     sync.Mutex
 	statusCache map[string]statusEntry
+
+	// requests accounts for upstream HTTP traffic (rolling hour).
+	requests *requestCounter
+	// buildCache caches aggregate build states per source commit.
+	buildCache *buildStateCache
 }
 
 // listEntry is one cached PR list.
@@ -84,13 +90,20 @@ func New(opts Options) *Client {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Client{
 		baseURL:     baseURL,
 		email:       opts.Email,
 		token:       opts.Token,
 		hc:          hc,
 		log:         logger,
+		now:         now,
 		statusCache: make(map[string]statusEntry),
+		requests:    newRequestCounter(now),
+		buildCache:  newBuildStateCache(now),
 	}
 }
 
@@ -122,7 +135,8 @@ type ActiveRepo struct {
 //
 // Build states are intentionally not fetched here: that costs one request per PR,
 // and the scanner (which calls this for every active repo) must stay rate-limit
-// friendly. The PR detail endpoint still returns real build states.
+// friendly. The list handlers fill them from the build-state cache, and the PR
+// detail endpoint still returns real build states.
 func (c *Client) ReviewPRs(ctx context.Context, repo Repo, state string) ([]PRSummary, error) {
 	me, err := c.Me(ctx)
 	if err != nil {
@@ -132,7 +146,7 @@ func (c *Client) ReviewPRs(ctx context.Context, repo Repo, state string) ([]PRSu
 		state = "OPEN"
 	}
 	q := fmt.Sprintf(`reviewers.uuid="%s"`, me.UUID)
-	prs, _, err := c.listRepoPRs(ctx, repo, q, state, me.UUID)
+	prs, err := c.listRepoPRs(ctx, repo, q, state, me.UUID)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +155,7 @@ func (c *Client) ReviewPRs(ctx context.Context, repo Repo, state string) ([]PRSu
 }
 
 // AuthorPRs lists pull requests from the workspace-wide endpoint (no per-repo
-// fan-out), with build states filled in.
+// fan-out) with build states filled in from the cache.
 func (c *Client) AuthorPRs(ctx context.Context, workspace, state string) ([]PRSummary, error) {
 	me, err := c.Me(ctx)
 	if err != nil {
@@ -164,8 +178,6 @@ func (c *Client) AuthorPRs(ctx context.Context, workspace, state string) ([]PRSu
 	}
 	fallback := Repo{Workspace: workspace}
 	prs := make([]PRSummary, 0, len(raw))
-	repos := make([]Repo, 0, len(raw))
-	hashes := make([]string, 0, len(raw))
 	for _, a := range raw {
 		repo := repoFromPR(a, fallback)
 		if repo.Repo == "" {
@@ -173,17 +185,14 @@ func (c *Client) AuthorPRs(ctx context.Context, workspace, state string) ([]PRSu
 			continue
 		}
 		prs = append(prs, a.toSummary(repo, me.UUID))
-		repos = append(repos, repo)
-		hashes = append(hashes, a.Source.Commit.Hash)
 	}
-	c.fillBuildStates(ctx, repos, hashes, prs)
+	c.FillBuildStates(ctx, prs, DefaultBuildBudget)
 	sortPRs(prs)
 	return prs, nil
 }
 
-// listRepoPRs fetches every page of one repo's pull request list. It returns the
-// summaries plus each PR's source commit hash (empty when the API omitted it).
-func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID string) ([]PRSummary, []string, error) {
+// listRepoPRs fetches every page of one repo's pull request list.
+func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID string) ([]PRSummary, error) {
 	// Bitbucket ignores the state parameter whenever q is present, so the state
 	// filter must live inside q or merged/declined PRs come back too.
 	values := url.Values{}
@@ -192,26 +201,21 @@ func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID st
 	values.Set("fields", "+values.participants")
 
 	var prs []PRSummary
-	var hashes []string
 	next := fmt.Sprintf("%s/pullrequests?%s", repoPath(repo), values.Encode())
 	for pageNo := 0; next != "" && pageNo < maxPages; pageNo++ {
 		var payload page[apiPR]
 		if err := c.getJSON(ctx, next, &payload); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		for _, a := range payload.Values {
 			prs = append(prs, a.toSummary(repo, meUUID))
-			hashes = append(hashes, a.Source.Commit.Hash)
 		}
 		next = payload.Next
 	}
 	if prs == nil {
 		prs = []PRSummary{}
 	}
-	if hashes == nil {
-		hashes = []string{}
-	}
-	return prs, hashes, nil
+	return prs, nil
 }
 
 // withState adds a state="..." clause to a BBQL query.
@@ -274,33 +278,8 @@ func (c *Client) DiscoverActiveRepos(ctx context.Context, workspace string, acti
 	return repos, nil
 }
 
-// fillBuildStates aggregates commit statuses onto each summary, concurrently.
-func (c *Client) fillBuildStates(ctx context.Context, repos []Repo, hashes []string, prs []PRSummary) {
-	if len(prs) == 0 || len(prs) != len(repos) || len(prs) != len(hashes) {
-		return
-	}
-	states := make([]BuildState, len(prs))
-	runConcurrently(len(prs), func(i int) {
-		if hashes[i] == "" {
-			return
-		}
-		builds, err := c.commitStatuses(ctx, repos[i], hashes[i])
-		if err != nil {
-			c.log.Warn("commit statuses failed", "repo", repos[i].String(), "commit", hashes[i], "err", err.Error())
-			return
-		}
-		states[i] = aggregateBuilds(builds)
-	})
-	for i := range prs {
-		if states[i] == "" {
-			prs[i].BuildState = BuildNone
-			continue
-		}
-		prs[i].BuildState = states[i]
-	}
-}
-
 // PRDetail fetches a single pull request plus merge base and build statuses.
+// The build state it learns is cached for the list endpoints.
 func (c *Client) PRDetail(ctx context.Context, repo Repo, id int) (PRDetail, error) {
 	me, err := c.Me(ctx)
 	if err != nil {
@@ -325,6 +304,7 @@ func (c *Client) PRDetail(ctx context.Context, repo Repo, id int) (PRDetail, err
 	}
 	detail.Builds = builds
 	detail.BuildState = aggregateBuilds(builds)
+	c.recordBuildState(repo, detail.SourceCommit, detail.BuildState)
 	return detail, nil
 }
 
@@ -440,12 +420,21 @@ func (c *Client) File(ctx context.Context, repo Repo, commit, filePath string) (
 	return c.stream(ctx, target, "*/*")
 }
 
-// InvalidateStatusCache drops cached commit statuses, so a write (comment,
-// approve, request changes) is followed by fresh build data on the next detail read.
+// InvalidateStatusCache drops cached commit statuses and aggregate build states,
+// so a write (comment, approve, request changes) is followed by fresh build data
+// on the next detail read.
 func (c *Client) InvalidateStatusCache() {
 	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
 	c.statusCache = make(map[string]statusEntry)
+	c.cacheMu.Unlock()
+	c.buildCache.clear()
+}
+
+// RequestsLastHour returns the upstream HTTP requests made in the last 60
+// minutes. Bitbucket Cloud sends no rate-limit headers, so this is the client's
+// own account of its traffic.
+func (c *Client) RequestsLastHour() int {
+	return c.requests.lastHour()
 }
 
 // RetryAfter returns the delay requested by an upstream 429 (0 when absent).
@@ -460,7 +449,7 @@ func (c *Client) cachedStatuses(key string) ([]BuildStatus, bool) {
 	c.cacheMu.Lock()
 	defer c.cacheMu.Unlock()
 	entry, ok := c.statusCache[key]
-	if !ok || time.Since(entry.at) > statusCacheTTL {
+	if !ok || c.now().Sub(entry.at) > statusCacheTTL {
 		return nil, false
 	}
 	return append([]BuildStatus(nil), entry.builds...), true
@@ -472,7 +461,7 @@ func (c *Client) storeStatuses(key string, builds []BuildStatus) {
 	if len(c.statusCache) > cacheSoftLimit {
 		c.statusCache = make(map[string]statusEntry)
 	}
-	c.statusCache[key] = statusEntry{at: time.Now(), builds: append([]BuildStatus(nil), builds...)}
+	c.statusCache[key] = statusEntry{at: c.now(), builds: append([]BuildStatus(nil), builds...)}
 }
 
 func sortPRs(prs []PRSummary) {
@@ -522,25 +511,6 @@ func escapePath(p string) string {
 		segments[i] = url.PathEscape(s)
 	}
 	return strings.Join(segments, "/")
-}
-
-// runConcurrently runs fn(0..n-1) with at most DefaultConcurrency in flight.
-func runConcurrently(n int, fn func(i int)) {
-	if n <= 0 {
-		return
-	}
-	sem := make(chan struct{}, DefaultConcurrency)
-	var wg sync.WaitGroup
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func(i int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			fn(i)
-		}(i)
-	}
-	wg.Wait()
 }
 
 // page is the Bitbucket pagination envelope.
@@ -641,6 +611,7 @@ func (c *Client) newRequest(ctx context.Context, method, target string, body io.
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	c.requests.record()
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		if ctxErr := req.Context().Err(); ctxErr != nil {

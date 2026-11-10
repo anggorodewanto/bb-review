@@ -44,6 +44,7 @@ type PRSummary = {
   my_state: ReviewState;                          // current user's review state
   approvals: number;                              // count of participants approved
   build_state: BuildState;                        // aggregate of commit statuses on source commit
+  source_commit: string;                          // full hash of the source head commit; "" when unknown
   url: string;                                    // bitbucket.org html link
 };
 
@@ -55,10 +56,20 @@ type PRDetail = PRSummary & {
   description_raw: string;
   description_html: string;                       // Bitbucket-rendered HTML
   participants: Participant[];
-  source_commit: string;                          // full hash
   dest_commit: string;
   merge_base: string;                             // full hash; "old" side of the diff
   builds: BuildStatus[];
+};
+
+type Stats = {
+  upstream_last_hour: number;                     // upstream HTTP requests in the last 60 minutes
+  scanner: {
+    last_tick_at: string;                         // RFC3339, "" before the first tick
+    last_full_sweep_at: string;                   // RFC3339
+    repos_tracked: number;
+    hot_repos: number;                            // tracked repos that still have open review PRs
+    rate_limited: boolean;                        // scanner is backing off from a 429
+  };
 };
 
 type InlineAnchor = { path: string; from: number | null; to: number | null };
@@ -101,7 +112,8 @@ Pull request list responses carry four optional headers:
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/me` | | `User` |
-| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc. `reviewer`: served immediately from the scanner state (union of the per-repo `open_review_prs`); never blocks on Bitbucket, and the scanner only tracks OPEN pull requests (the `state` parameter applies to `author`). `author`: one workspace-wide query, no fan-out. See headers above. |
+| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc. `reviewer`: served from the scanner state (union of the per-repo `open_review_prs`); the scanner only tracks OPEN pull requests (the `state` parameter applies to `author`). `author`: one workspace-wide query, no fan-out. Both roles fill `build_state` from the build-state cache; misses are fetched with concurrency 4 and a 2 s budget, so a list request never waits longer than that (rows that are not ready keep their last known state, and the fetch finishes in the background). See headers above. |
+| GET | `/api/stats` | | `Stats` — upstream request volume and scanner health. |
 | POST | `/api/scan` | | `{started: boolean}` — triggers an immediate reviewer scan tick in the background. Debounced: `started` is `false` when a tick is running or one started less than 10 s ago. |
 | GET | `{pr}` | | `PRDetail` |
 | GET | `{pr}/diff` | | `text/plain` unified git diff (Bitbucket `/diff`, redirects followed) |
@@ -136,12 +148,22 @@ Anything not under `/api/` serves the embedded SPA (`index.html` fallback for cl
     `GET /2.0/repositories/{ws}?sort=-updated_on&pagelen=100&fields=next,values.slug,values.updated_on`,
     paging only while `updated_on` is inside `active_days` (default 14) — 1-4 requests;
   - the tick queries a repo only when it was never scanned, its `updated_on` changed since
-    the last scan, it still has open review PRs ("hot"), or it is listed in `config.repos`;
+    the last scan, it still has open review PRs ("hot") and its `last_scanned_at` is older
+    than `hot_interval` (default 5 min), or it is listed in `config.repos`;
     every `full_sweep_interval` (default 6 h), or when no state exists yet, every active repo
     is queried. Concurrency is 4;
+  - every upstream request is counted by the client (rolling 60-minute, per-minute buckets).
+    When the count exceeds `request_budget` (default 800) the tick skips hot re-checks and
+    the full sweep (changed repos are still queried) and logs a warning. The count appears
+    as `upstream_last_hour` in the tick log and in `GET /api/stats`;
   - a repo query is
     `GET /2.0/repositories/{ws}/{repo}/pullrequests?state=OPEN&q=reviewers.uuid="{uuid}"`,
     `pagelen=50`, `fields=+values.participants`;
+  - list rows get `build_state` from a cache keyed by `{ws}/{repo}@{source_commit}`:
+    terminal states (`SUCCESSFUL`, `FAILED`, `STOPPED`) are kept until evicted (cap 5000,
+    random eviction); `INPROGRESS` / `NONE` are re-fetched at most every 2 min. Cache
+    misses are fetched with concurrency 4 within a 2 s budget per list request; the rest
+    finishes in the background. The PR detail fetch also populates the cache;
   - repos that leave the active window keep their PRs only while those are non-empty, and
     keep being re-checked ("hot") until they drain;
   - on `429` the tick stops early (partial results are kept), and the scanner backs off for
@@ -149,9 +171,8 @@ Anything not under `/api/` serves the embedded SPA (`index.html` fallback for cl
   - state is persisted after each tick under `"scanner"` in the state file: per repo
     `last_scanned_updated_on`, `last_scanned_at`, `open_review_prs`, plus
     `last_full_sweep_at` (and `last_tick_at`).
-  `GET /api/prs?role=reviewer` returns that state immediately; `POST /api/scan` starts a
-  tick on demand, and any write on a PR (comment, approve, request changes, submit)
-  re-queries that one repo.
+  `GET /api/prs?role=reviewer` returns that state; `POST /api/scan` starts a tick on demand,
+  and any write on a PR (comment, approve, request changes, submit) re-queries that one repo.
 - PR list, role=author: one call,
   `GET /2.0/workspaces/{ws}/pullrequests/{uuid}?state=OPEN&pagelen=50&fields=+values.participants`
   (the uuid is URL-encoded, braces included). Pagination followed.

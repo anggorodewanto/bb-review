@@ -200,6 +200,7 @@ func (a apiPR) toSummary(repo Repo, meUUID string) PRSummary {
 		MyState:      myState,
 		Approvals:    approvals,
 		BuildState:   BuildNone,
+		SourceCommit: a.Source.Commit.Hash,
 		URL:          a.Links.HTML.Href,
 	}
 }
@@ -211,7 +212,6 @@ func (a apiPR) toDetail(repo Repo, meUUID string) PRDetail {
 		DescriptionRaw:  a.Description,
 		DescriptionHTML: descriptionHTML(a),
 		Participants:    participantsOf(a.Participants),
-		SourceCommit:    a.Source.Commit.Hash,
 		DestCommit:      a.Destination.Commit.Hash,
 		MergeBase:       a.Destination.Commit.Hash,
 		Builds:          []BuildStatus{},

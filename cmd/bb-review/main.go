@@ -77,6 +77,8 @@ func run(logger *slog.Logger) error {
 		ActiveDays:        cfg.ActiveDaysOrDefault(),
 		ScanInterval:      cfg.ScanIntervalOrDefault(),
 		FullSweepInterval: cfg.FullSweepIntervalOrDefault(),
+		HotInterval:       cfg.HotIntervalOrDefault(),
+		RequestBudget:     cfg.RequestBudgetOrDefault(),
 	})
 
 	handler := server.New(server.Options{
@@ -108,6 +110,8 @@ func run(logger *slog.Logger) error {
 			"repos", len(cfg.Repos),
 			"scan_interval", cfg.ScanIntervalOrDefault().String(),
 			"full_sweep_interval", cfg.FullSweepIntervalOrDefault().String(),
+			"hot_interval", cfg.HotIntervalOrDefault().String(),
+			"request_budget", cfg.RequestBudgetOrDefault(),
 			"state", localStore.Path(),
 			"frontend_built", indexAvailable,
 		)

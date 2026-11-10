@@ -27,6 +27,12 @@ const (
 	DefaultScanInterval = 60 * time.Second
 	// DefaultFullSweepInterval is how often every active repo is re-queried.
 	DefaultFullSweepInterval = 6 * time.Hour
+	// DefaultHotInterval is how often a hot repo (one with open review PRs) is
+	// re-queried when nothing changed.
+	DefaultHotInterval = 5 * time.Minute
+	// DefaultRequestBudget is the upstream requests/hour ceiling. Above it the
+	// scanner skips hot re-checks and full sweeps for that tick.
+	DefaultRequestBudget = 800
 	// DefaultConcurrency bounds concurrent repo queries. Deliberately lower than
 	// the old fan-out limit so ticks stay gentle on Bitbucket.
 	DefaultConcurrency = 4
@@ -93,6 +99,12 @@ type Options struct {
 	ScanInterval time.Duration
 	// FullSweepInterval is how often every active repo is re-queried (default 6h).
 	FullSweepInterval time.Duration
+	// HotInterval is how often a hot repo is re-queried when nothing changed
+	// (default 5m). Changed repos and ConfigRepos are still queried every tick.
+	HotInterval time.Duration
+	// RequestBudget is the upstream requests/hour ceiling (default 800). Above it
+	// a tick skips hot re-checks and full sweeps.
+	RequestBudget int
 	// Concurrency bounds concurrent repo queries (default 4).
 	Concurrency int
 	// Now is the clock, injectable for tests.
@@ -109,6 +121,8 @@ type Scanner struct {
 	activeDays        int
 	scanInterval      time.Duration
 	fullSweepInterval time.Duration
+	hotInterval       time.Duration
+	requestBudget     int
 	concurrency       int
 	now               func() time.Time
 
@@ -141,6 +155,8 @@ func New(opts Options) *Scanner {
 		activeDays:        opts.ActiveDays,
 		scanInterval:      opts.ScanInterval,
 		fullSweepInterval: opts.FullSweepInterval,
+		hotInterval:       opts.HotInterval,
+		requestBudget:     opts.RequestBudget,
 		concurrency:       opts.Concurrency,
 		now:               opts.Now,
 		state:             State{Repos: map[string]RepoState{}},
@@ -153,6 +169,12 @@ func New(opts Options) *Scanner {
 	}
 	if s.fullSweepInterval <= 0 {
 		s.fullSweepInterval = DefaultFullSweepInterval
+	}
+	if s.hotInterval <= 0 {
+		s.hotInterval = DefaultHotInterval
+	}
+	if s.requestBudget <= 0 {
+		s.requestBudget = DefaultRequestBudget
 	}
 	if s.concurrency <= 0 {
 		s.concurrency = DefaultConcurrency
@@ -279,12 +301,23 @@ func (s *Scanner) tick(ctx context.Context, startedAt time.Time) error {
 	}
 
 	now := s.now()
+	upstreamLastHour := 0
+	if s.client != nil {
+		upstreamLastHour = s.client.RequestsLastHour()
+	}
+	overBudget := upstreamLastHour > s.requestBudget
+
 	s.mu.Lock()
 	state := s.state
 	firstSweep := len(state.Repos) == 0
 	fullSweep := firstSweep
 	if at, ok := parseTime(state.LastFullSweepAt); !ok || now.Sub(at) >= s.fullSweepInterval {
 		fullSweep = true
+	}
+	if overBudget {
+		// Non-essential work waits for a cheaper tick: changed repos are still
+		// queried, hot re-checks and full sweeps are not.
+		fullSweep = false
 	}
 
 	activeKeys := make(map[string]struct{}, len(active))
@@ -302,7 +335,7 @@ func (s *Scanner) tick(ctx context.Context, startedAt time.Time) error {
 		delete(state.Repos, key)
 	}
 
-	targets := s.targetsLocked(active, activeKeys, fullSweep)
+	targets := s.targetsLocked(active, activeKeys, fullSweep, !overBudget, now)
 	scanning := firstSweep && len(targets) > 0
 	if scanning {
 		s.scanning = true
@@ -310,6 +343,13 @@ func (s *Scanner) tick(ctx context.Context, startedAt time.Time) error {
 		s.total = len(targets)
 	}
 	s.mu.Unlock()
+
+	if overBudget {
+		s.log.Warn("upstream request budget spent, skipping hot re-checks and full sweep",
+			"upstream_last_hour", upstreamLastHour,
+			"request_budget", s.requestBudget,
+		)
+	}
 
 	rateLimited, retryAfter, failed := s.query(ctx, targets, now)
 	finishedAt := s.now()
@@ -342,6 +382,7 @@ func (s *Scanner) tick(ctx context.Context, startedAt time.Time) error {
 		"full_sweep", fullSweep,
 		"failed", len(failed),
 		"rate_limited", rateLimited,
+		"upstream_last_hour", s.upstreamLastHour(),
 		"duration_ms", s.now().Sub(startedAt).Milliseconds(),
 	)
 	return nil
@@ -355,8 +396,9 @@ type target struct {
 }
 
 // targetsLocked decides which repos to query: everything on a full sweep, otherwise
-// new/changed/hot repos plus the configured "always check" repos.
-func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[string]struct{}, fullSweep bool) []target {
+// new/changed repos, hot repos whose hot_interval elapsed (when includeHot is set),
+// plus the configured "always check" repos.
+func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[string]struct{}, fullSweep, includeHot bool, now time.Time) []target {
 	targets := make([]target, 0, len(active)+len(s.configRepos))
 	seen := make(map[string]struct{}, len(active)+len(s.configRepos))
 	add := func(t target) {
@@ -371,9 +413,15 @@ func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[st
 	for _, item := range active {
 		key := item.Repo.String()
 		stored, known := s.state.Repos[key]
-		hot := known && len(stored.OpenReviewPRs) > 0
 		changed := !known || stored.LastScannedUpdatedOn != updatedOnKey(item.UpdatedOn)
-		if fullSweep || hot || changed {
+		if changed || fullSweep {
+			add(target{repo: item.Repo, updatedOn: item.UpdatedOn, inWindow: true})
+			continue
+		}
+		if !includeHot {
+			continue
+		}
+		if len(stored.OpenReviewPRs) > 0 && s.hotDue(stored, now) {
 			add(target{repo: item.Repo, updatedOn: item.UpdatedOn, inWindow: true})
 		}
 	}
@@ -384,6 +432,9 @@ func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[st
 			continue
 		}
 		if _, ok := activeKeys[key]; ok {
+			continue
+		}
+		if !includeHot || !s.hotDue(stored, now) {
 			continue
 		}
 		repo, ok := repoFromKey(key, s.workspace)
@@ -397,6 +448,16 @@ func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[st
 		add(target{repo: repo})
 	}
 	return targets
+}
+
+// hotDue reports whether a hot repo is due for a re-check: its last scan is at
+// least hot_interval ago, or it has no recorded scan time.
+func (s *Scanner) hotDue(stored RepoState, now time.Time) bool {
+	at, ok := parseTime(stored.LastScannedAt)
+	if !ok {
+		return true
+	}
+	return now.Sub(at) >= s.hotInterval
 }
 
 // repoFromKey parses a "workspace/repo" state key. Keys without a workspace use the
@@ -515,6 +576,47 @@ func (s *Scanner) Busy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ticking
+}
+
+// Stats is the scanner half of GET /api/stats.
+type Stats struct {
+	// LastTickAt is when the last tick finished (RFC3339), "" when none ran yet.
+	LastTickAt string `json:"last_tick_at"`
+	// LastFullSweepAt is when every active repo was last queried (RFC3339).
+	LastFullSweepAt string `json:"last_full_sweep_at"`
+	// ReposTracked is the number of repos in scanner state.
+	ReposTracked int `json:"repos_tracked"`
+	// HotRepos is the number of tracked repos that still have open review PRs.
+	HotRepos int `json:"hot_repos"`
+	// RateLimited is true while the scanner is backing off from a 429.
+	RateLimited bool `json:"rate_limited"`
+}
+
+// Stats reports scanner health for GET /api/stats.
+func (s *Scanner) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stats := Stats{
+		LastTickAt:      s.state.LastTickAt,
+		LastFullSweepAt: s.state.LastFullSweepAt,
+		ReposTracked:    len(s.state.Repos),
+		RateLimited:     s.now().Before(s.rateLimitedUntil),
+	}
+	for _, stored := range s.state.Repos {
+		if len(stored.OpenReviewPRs) > 0 {
+			stats.HotRepos++
+		}
+	}
+	return stats
+}
+
+// upstreamLastHour returns the client's upstream request count for the last hour.
+func (s *Scanner) upstreamLastHour() int {
+	if s.client == nil {
+		return 0
+	}
+	return s.client.RequestsLastHour()
 }
 
 // Snapshot returns the current reviewer list and its freshness/progress metadata.

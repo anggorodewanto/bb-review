@@ -103,7 +103,10 @@ type PRSummary struct {
 	MyState      ReviewState `json:"my_state"`
 	Approvals    int         `json:"approvals"`
 	BuildState   BuildState  `json:"build_state"`
-	URL          string      `json:"url"`
+	// SourceCommit is the head commit of the source branch. It is empty when
+	// Bitbucket omitted it; build states are keyed by it.
+	SourceCommit string `json:"source_commit"`
+	URL          string `json:"url"`
 }
 
 // Participant is one reviewer on a pull request.
@@ -127,7 +130,6 @@ type PRDetail struct {
 	DescriptionRaw  string        `json:"description_raw"`
 	DescriptionHTML string        `json:"description_html"`
 	Participants    []Participant `json:"participants"`
-	SourceCommit    string        `json:"source_commit"`
 	DestCommit      string        `json:"dest_commit"`
 	MergeBase       string        `json:"merge_base"`
 	Builds          []BuildStatus `json:"builds"`

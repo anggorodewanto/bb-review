@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/resolve", s.handleResolve)
 	mux.HandleFunc("GET /api/prs", s.handlePRList)
 	mux.HandleFunc("POST /api/scan", s.handleScan)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}", s.handlePRDetail)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}/diff", s.handleDiff)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}/comments", s.handleComments)

@@ -81,6 +81,8 @@ func newTestEnvWithConfig(t *testing.T, upstream http.Handler, cfg *config.Confi
 		ActiveDays:        cfg.ActiveDaysOrDefault(),
 		ScanInterval:      cfg.ScanIntervalOrDefault(),
 		FullSweepInterval: cfg.FullSweepIntervalOrDefault(),
+		HotInterval:       cfg.HotIntervalOrDefault(),
+		RequestBudget:     cfg.RequestBudgetOrDefault(),
 	})
 	srv := New(Options{Config: cfg, Client: client, Store: st, Logger: discardLogger(), Scanner: sc})
 	return &testEnv{handler: srv.Handler(), store: st, cfg: cfg, scanner: sc, client: client}

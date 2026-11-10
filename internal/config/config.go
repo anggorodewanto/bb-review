@@ -37,6 +37,13 @@ const DefaultScanInterval = 60 * time.Second
 // DefaultFullSweepInterval is how often the scanner re-queries every active repo.
 const DefaultFullSweepInterval = 6 * time.Hour
 
+// DefaultHotInterval is how often a hot repo (one with open review PRs) is
+// re-queried when nothing changed.
+const DefaultHotInterval = 5 * time.Minute
+
+// DefaultRequestBudget is the upstream requests/hour ceiling.
+const DefaultRequestBudget = 800
+
 // Config is ~/.config/bb-review/config.json.
 type Config struct {
 	Email string `json:"email"`
@@ -56,6 +63,12 @@ type Config struct {
 	ScanInterval string `json:"scan_interval,omitempty"`
 	// FullSweepInterval is how often every active repo is re-queried, e.g. "6h".
 	FullSweepInterval string `json:"full_sweep_interval,omitempty"`
+	// HotInterval is how often a hot repo is re-queried when nothing changed,
+	// e.g. "5m". Changed repos and config.repos still get queried every tick.
+	HotInterval string `json:"hot_interval,omitempty"`
+	// RequestBudget is the upstream requests/hour ceiling (default 800). Above it
+	// the scanner skips hot re-checks and full sweeps for that tick.
+	RequestBudget int `json:"request_budget,omitempty"`
 	// StatePath overrides the local state file (~/.local/share/bb-review/state.json).
 	StatePath string `json:"state_path,omitempty"`
 	// BaseURL overrides the Bitbucket API root (useful for tests and proxies).
@@ -209,6 +222,7 @@ func (c *Config) validate() error {
 		"discovery_ttl":       c.DiscoveryTTL,
 		"scan_interval":       c.ScanInterval,
 		"full_sweep_interval": c.FullSweepInterval,
+		"hot_interval":        c.HotInterval,
 	} {
 		if strings.TrimSpace(raw) == "" {
 			continue
@@ -220,6 +234,9 @@ func (c *Config) validate() error {
 		if d <= 0 {
 			return fmt.Errorf("%s must be positive", field)
 		}
+	}
+	if c.RequestBudget < 0 {
+		return fmt.Errorf("request_budget must not be negative")
 	}
 
 	if strings.TrimSpace(c.Listen) == "" {
@@ -251,6 +268,19 @@ func (c *Config) ScanIntervalOrDefault() time.Duration {
 // FullSweepIntervalOrDefault returns how often the scanner re-queries every repo.
 func (c *Config) FullSweepIntervalOrDefault() time.Duration {
 	return durationOrDefault(c.FullSweepInterval, DefaultFullSweepInterval)
+}
+
+// HotIntervalOrDefault returns how often a hot repo is re-queried.
+func (c *Config) HotIntervalOrDefault() time.Duration {
+	return durationOrDefault(c.HotInterval, DefaultHotInterval)
+}
+
+// RequestBudgetOrDefault returns the upstream requests/hour ceiling.
+func (c *Config) RequestBudgetOrDefault() int {
+	if c.RequestBudget <= 0 {
+		return DefaultRequestBudget
+	}
+	return c.RequestBudget
 }
 
 // durationOrDefault parses raw, falling back to def for empty or invalid values.
