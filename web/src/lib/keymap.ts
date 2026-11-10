@@ -1,26 +1,11 @@
-// One keymap definition powers both the global handler and the help overlay.
+// One command registry (lib/commands.ts) powers the global handler, the help
+// overlay, the palette and the help page. This module turns it into key
+// bindings and resolves keyboard events.
 
-export type KeyAction =
-    | 'next-file'
-    | 'prev-file'
-    | 'next-hunk'
-    | 'prev-hunk'
-    | 'next-line'
-    | 'prev-line'
-    | 'comment'
-    | 'toggle-viewed'
-    | 'approve'
-    | 'submit'
-    | 'toggle-tree'
-    | 'toggle-split'
-    | 'toggle-wrap'
-    | 'next-comment'
-    | 'prev-comment'
-    | 'toggle-comments'
-    | 'scroll-top'
-    | 'inbox'
-    | 'help'
-    | 'escape';
+import {COMMANDS} from './commands';
+import type {CommandId} from './commands';
+
+export type KeyAction = CommandId;
 
 export type KeyBinding = {
     action: KeyAction;
@@ -30,49 +15,95 @@ export type KeyBinding = {
     group: 'Navigate' | 'Review' | 'View' | 'Help';
 };
 
-export const KEYMAP: KeyBinding[] = [
-    {action: 'next-file', keys: ['j'], label: 'Next file', group: 'Navigate'},
-    {action: 'prev-file', keys: ['k'], label: 'Previous file', group: 'Navigate'},
-    {action: 'next-hunk', keys: ['n'], label: 'Next hunk', group: 'Navigate'},
-    {action: 'prev-hunk', keys: ['p'], label: 'Previous hunk', group: 'Navigate'},
-    {action: 'next-line', keys: ['ArrowDown'], label: 'Next line', group: 'Navigate'},
-    {action: 'prev-line', keys: ['ArrowUp'], label: 'Previous line', group: 'Navigate'},
-    {action: 'next-line', keys: ['J'], label: 'Next line', group: 'Navigate'},
-    {action: 'prev-line', keys: ['K'], label: 'Previous line', group: 'Navigate'},
-    {action: 'next-comment', keys: [']'], label: 'Next comment thread', group: 'Navigate'},
-    {action: 'prev-comment', keys: ['['], label: 'Previous comment thread', group: 'Navigate'},
-    {action: 'scroll-top', keys: ['g', 'g'], label: 'Go to top of page', group: 'Navigate'},
-    {action: 'scroll-top', keys: ['Home'], label: 'Go to top of page', group: 'Navigate'},
-    {action: 'comment', keys: ['c'], label: 'Comment on focused line', group: 'Review'},
-    {action: 'toggle-viewed', keys: ['v'], label: 'Toggle viewed, jump to next unviewed', group: 'Review'},
-    {action: 'approve', keys: ['a'], label: 'Toggle approve', group: 'Review'},
-    {action: 'submit', keys: ['s'], label: 'Submit review', group: 'Review'},
-    {action: 'toggle-tree', keys: ['t'], label: 'Toggle file tree', group: 'View'},
-    {action: 'toggle-split', keys: ['u'], label: 'Toggle split / unified', group: 'View'},
-    {action: 'toggle-wrap', keys: ['w'], label: 'Toggle line wrapping', group: 'View'},
-    {action: 'toggle-comments', keys: ['C'], label: 'Toggle comments panel', group: 'View'},
-    {action: 'inbox', keys: ['g', 'i'], label: 'Go to inbox', group: 'Navigate'},
-    {action: 'help', keys: ['?'], label: 'Show keyboard help', group: 'Help'},
-    {action: 'escape', keys: ['Escape'], label: 'Close editor / overlay', group: 'Help'},
-];
+type LegacyGroup = KeyBinding['group'];
+
+function legacyGroup(group: string): LegacyGroup {
+    if (group === 'Navigation' || group === 'Comments') {
+        return 'Navigate';
+    }
+    if (group === 'Review' || group === 'View') {
+        return group;
+    }
+    return 'Help';
+}
+
+/**
+ * Compatibility view of the registry: one entry per key sequence. New code
+ * should read COMMANDS from lib/commands.ts directly.
+ */
+export const KEYMAP: KeyBinding[] = COMMANDS.flatMap((command) =>
+    command.keys.map((keys) => ({
+        action: command.id,
+        keys,
+        label: command.title,
+        group: legacyGroup(command.group),
+    })),
+);
+
+type ParsedToken = {
+    key: string;
+    ctrl: boolean;
+    meta: boolean;
+    shift: boolean;
+    modified: boolean;
+};
+
+function parseToken(raw: string): ParsedToken {
+    const parts = raw.split('+');
+    const key = parts.pop() ?? raw;
+    const modifiers = new Set(parts.map((part) => part.toLowerCase()));
+    return {
+        key,
+        ctrl: modifiers.has('ctrl'),
+        meta: modifiers.has('meta'),
+        shift: modifiers.has('shift'),
+        modified: modifiers.size > 0,
+    };
+}
+
+function modifiedId(token: ParsedToken): string {
+    const mods: string[] = [];
+    if (token.ctrl) {
+        mods.push('ctrl');
+    }
+    if (token.meta) {
+        mods.push('meta');
+    }
+    if (token.shift) {
+        mods.push('shift');
+    }
+    return `${mods.sort().join('+')}|${token.key.toLowerCase()}`;
+}
 
 const SINGLE = new Map<string, KeyAction>();
+const MODIFIED = new Map<string, KeyAction>();
 const CHORDS = new Map<string, Map<string, KeyAction>>();
 
-for (const binding of KEYMAP) {
-    const [first, second, ...rest] = binding.keys;
-    if (!first || rest.length > 0) {
-        continue;
-    }
-    if (second === undefined) {
-        if (!SINGLE.has(first)) {
-            SINGLE.set(first, binding.action);
+for (const command of COMMANDS) {
+    for (const sequence of command.keys) {
+        const [first, second, ...rest] = sequence;
+        if (!first || rest.length > 0) {
+            continue;
         }
-        continue;
+        if (second === undefined) {
+            const token = parseToken(first);
+            if (token.modified) {
+                if (!MODIFIED.has(modifiedId(token))) {
+                    MODIFIED.set(modifiedId(token), command.id);
+                }
+                continue;
+            }
+            if (!SINGLE.has(first)) {
+                SINGLE.set(first, command.id);
+            }
+            continue;
+        }
+        const next = CHORDS.get(first) ?? new Map<string, KeyAction>();
+        if (!next.has(second)) {
+            next.set(second, command.id);
+        }
+        CHORDS.set(first, next);
     }
-    const next = CHORDS.get(first) ?? new Map<string, KeyAction>();
-    next.set(second, binding.action);
-    CHORDS.set(first, next);
 }
 
 export type KeyInput = {
@@ -80,6 +111,7 @@ export type KeyInput = {
     ctrlKey: boolean;
     metaKey: boolean;
     altKey: boolean;
+    shiftKey?: boolean;
     target: EventTarget | null;
 };
 
@@ -106,7 +138,26 @@ export function isTypingTarget(target: EventTarget | null): boolean {
     return editable !== null && editable !== 'false';
 }
 
+function inputModifiedId(input: KeyInput): string {
+    const mods: string[] = [];
+    // Ctrl and Cmd are interchangeable (Cmd on macOS).
+    if (input.ctrlKey || input.metaKey) {
+        mods.push('ctrl');
+    }
+    if (input.shiftKey) {
+        mods.push('shift');
+    }
+    return `${mods.sort().join('+')}|${input.key.toLowerCase()}`;
+}
+
 export function resolveKey(input: KeyInput, pending: string | null): KeyResult {
+    // Modifier shortcuts (e.g. Ctrl+K) work even while typing in a field.
+    if (input.ctrlKey || input.metaKey) {
+        const modified = MODIFIED.get(inputModifiedId(input));
+        if (modified) {
+            return {action: modified, pending: null};
+        }
+    }
     if (isTypingTarget(input.target)) {
         return EMPTY;
     }
@@ -143,13 +194,29 @@ export const KEYMAP_GROUPS: Array<{group: string; bindings: KeyBinding[]}> = [
     bindings: KEYMAP.filter((binding) => binding.group === group),
 }));
 
+function keyLabel(key: string): string {
+    if (key === 'ArrowDown') {
+        return '↓';
+    }
+    if (key === 'ArrowUp') {
+        return '↑';
+    }
+    if (key === 'Escape') {
+        return 'Esc';
+    }
+    return key;
+}
+
+/** Compact display for a single key sequence, e.g. "g i" or "Ctrl+K". */
+export function formatShortcut(keys: string[]): string {
+    return keys.map(keyLabel).join(' ');
+}
+
+/** Human-readable list of every sequence for a command. */
+export function formatShortcutList(sequences: string[][]): string {
+    return sequences.map(formatShortcut).join(' / ');
+}
+
 export function formatKeys(keys: string[]): string {
-    return keys
-        .map((key) => {
-            if (key === 'ArrowDown') return '↓';
-            if (key === 'ArrowUp') return '↑';
-            if (key === 'Escape') return 'Esc';
-            return key;
-        })
-        .join(' then ');
+    return keys.map(keyLabel).join(' then ');
 }

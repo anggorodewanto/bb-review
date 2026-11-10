@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
-import {MemoryRouter, Route, Routes} from 'react-router-dom';
+import {MemoryRouter, Route, Routes, useLocation} from 'react-router-dom';
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import {Inbox, SCAN_SETTLE_MS} from './Inbox';
 import type {PRSummary, User} from '../types';
@@ -109,6 +109,38 @@ function renderInbox(path = '/') {
             >
                 <Routes>
                     <Route path="/" element={<Inbox />} />
+                    <Route path="/pr/:ws/:repo/:id" element={<div>PR page</div>} />
+                </Routes>
+            </MemoryRouter>
+        </QueryClientProvider>,
+    );
+}
+
+function LocationEcho() {
+    const location = useLocation();
+    return <div data-testid="location">{location.search}</div>;
+}
+
+function renderInboxLocated(path = '/') {
+    const client = new QueryClient({
+        defaultOptions: {queries: {retry: false, gcTime: 0}},
+    });
+    return render(
+        <QueryClientProvider client={client}>
+            <MemoryRouter
+                initialEntries={[path]}
+                future={{v7_startTransition: true, v7_relativeSplatPath: true}}
+            >
+                <Routes>
+                    <Route
+                        path="/"
+                        element={
+                            <>
+                                <Inbox />
+                                <LocationEcho />
+                            </>
+                        }
+                    />
                     <Route path="/pr/:ws/:repo/:id" element={<div>PR page</div>} />
                 </Routes>
             </MemoryRouter>
@@ -236,5 +268,45 @@ describe('Inbox open-by-link', () => {
         await screen.findByText('Improve the diff viewer');
         fireEvent.keyDown(window, {key: 'o'});
         expect(screen.getByLabelText('Open a pull request by URL')).toHaveFocus();
+    });
+});
+
+describe('Inbox URL state', () => {
+    it('reads the tab and filter from the URL', async () => {
+        renderInbox('/?tab=mine&q=diff');
+        expect(await screen.findByRole('tab', {name: 'Mine'})).toHaveAttribute('aria-selected', 'true');
+        expect(screen.getByRole('searchbox', {name: 'Filter pull requests'})).toHaveValue('diff');
+    });
+
+    it('accepts the legacy role=author tab', async () => {
+        renderInbox('/?role=author');
+        expect(await screen.findByRole('tab', {name: 'Mine'})).toHaveAttribute('aria-selected', 'true');
+    });
+
+    it('writes the filter to the URL after a debounce', async () => {
+        renderInboxLocated();
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.change(screen.getByRole('searchbox', {name: 'Filter pull requests'}), {
+            target: {value: 'diff'},
+        });
+        await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('?q=diff'), {
+            timeout: 1500,
+        });
+    });
+
+    it('keeps the filter when switching tabs', async () => {
+        renderInboxLocated('/?q=diff');
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.click(screen.getByRole('tab', {name: 'Mine'}));
+        await waitFor(() =>
+            expect(screen.getByTestId('location').textContent).toBe('?tab=mine&q=diff'),
+        );
+    });
+
+    it('drops the default tab from the URL', async () => {
+        renderInboxLocated('/?tab=mine');
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.click(screen.getByRole('tab', {name: 'To review'}));
+        await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(''));
     });
 });

@@ -49,6 +49,7 @@ export function ReviewBar({
                 <button
                     type="button"
                     className="btn btn-primary review-submit"
+                    data-command="submit"
                     aria-expanded={open}
                     aria-haspopup="menu"
                     disabled={busy}

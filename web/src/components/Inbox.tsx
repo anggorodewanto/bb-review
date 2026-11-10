@@ -1,31 +1,50 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
-import {Link, useNavigate, useSearchParams} from 'react-router-dom';
+import {Link, useLocation, useNavigate, useSearchParams} from 'react-router-dom';
 import {useMutation, useQuery} from '@tanstack/react-query';
 import * as api from '../api';
 import type {PRSummary} from '../types';
 import {fuzzyMatch, relativeAge, relativeAgeLong, isoTitle} from '../lib/format';
 import {extractPRUrl} from '../lib/prUrl';
-import {isTypingTarget, resolveKey} from '../lib/keymap';
-import {isCodeScrollTarget, scrollPageToTop} from '../lib/scroll';
+import {isTypingTarget} from '../lib/keymap';
+import {scrollPageToTop} from '../lib/scroll';
+import {rememberInboxUrl} from '../lib/inboxUrl';
+import {useScrollMemory} from '../lib/useScrollMemory';
+import type {DynamicCommand} from '../lib/commands';
 import {BackToTop} from './BackToTop';
+import {CommandButton, usePageCommands} from './CommandHost';
 import {Avatar, BuildDot, EmptyState, ErrorState, ReviewBadge, Skeleton, Spinner} from './ui';
 
 type Role = 'reviewer' | 'author';
 
 const REFRESH_TICK_MS = 10_000;
 const SCAN_POLL_MS = 3_000;
+const FILTER_URL_DEBOUNCE_MS = 300;
 export const SCAN_SETTLE_MS = 2_000;
+
+function inboxParams(role: Role, query: string): Record<string, string> {
+    const next: Record<string, string> = {};
+    if (role === 'author') {
+        next.tab = 'mine';
+    }
+    if (query.trim().length > 0) {
+        next.q = query;
+    }
+    return next;
+}
 
 export function Inbox() {
     const [params, setParams] = useSearchParams();
-    const role: Role = params.get('role') === 'author' ? 'author' : 'reviewer';
-    const [filter, setFilter] = useState('');
+    const location = useLocation();
+    const role: Role =
+        params.get('tab') === 'mine' || params.get('role') === 'author' ? 'author' : 'reviewer';
+    const urlQuery = params.get('q') ?? '';
+    const [filter, setFilter] = useState(urlQuery);
+    const lastQuery = useRef(urlQuery);
     const [url, setUrl] = useState('');
     const [inputError, setInputError] = useState<string | null>(null);
     const [now, setNow] = useState(() => Date.now());
     const urlInputRef = useRef<HTMLInputElement>(null);
     const pageRef = useRef<HTMLDivElement>(null);
-    const pendingChord = useRef<string | null>(null);
     const navigate = useNavigate();
 
     const listQuery = useQuery({
@@ -44,7 +63,7 @@ export function Inbox() {
     const resolveMutation = useMutation({
         mutationFn: (rawUrl: string) => api.resolvePR(rawUrl),
         onSuccess: (ref) => {
-            navigate(`/pr/${ref.workspace}/${ref.repo}/${ref.id}`);
+            navigate(`/pr/${ref.workspace}/${ref.repo}/${ref.id}`, {state: {fromApp: true}});
         },
     });
 
@@ -109,32 +128,53 @@ export function Inbox() {
         return () => window.removeEventListener('keydown', onKeyDown);
     }, []);
 
-    // `g g` (and Home) scroll back to the top on small screens / long lists.
+    // Keep the filter input and the `q` URL parameter in sync. Typing only
+    // replaces the history entry after a short debounce.
     useEffect(() => {
-        function onKeyDown(event: KeyboardEvent) {
-            const result = resolveKey(
-                {
-                    key: event.key,
-                    ctrlKey: event.ctrlKey,
-                    metaKey: event.metaKey,
-                    altKey: event.altKey,
-                    target: event.target,
-                },
-                pendingChord.current,
-            );
-            pendingChord.current = result.pending;
-            if (result.action !== 'scroll-top') {
-                return;
-            }
-            if (event.key === 'Home' && isCodeScrollTarget(event.target)) {
-                return;
-            }
-            event.preventDefault();
-            scrollPageToTop(pageRef.current);
+        if (urlQuery === lastQuery.current) {
+            return;
         }
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, []);
+        lastQuery.current = urlQuery;
+        setFilter(urlQuery);
+    }, [urlQuery]);
+
+    useEffect(() => {
+        if (filter === urlQuery) {
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            lastQuery.current = filter;
+            setParams(inboxParams(role, filter), {replace: true});
+        }, FILTER_URL_DEBOUNCE_MS);
+        return () => window.clearTimeout(timer);
+    }, [filter, role, urlQuery, setParams]);
+
+    // Remember the inbox URL so `g i` and the help page return here.
+    useEffect(() => {
+        rememberInboxUrl(location.search);
+    }, [location.search]);
+
+    const dynamicCommands = useMemo<DynamicCommand[]>(
+        () =>
+            filtered.map((pr) => ({
+                id: `pr-${pr.workspace}-${pr.repo}-${pr.id}`,
+                title: `Open PR: ${pr.title}`,
+                section: 'prs',
+                search: [pr.title, `${pr.workspace}/${pr.repo}#${pr.id}`, pr.author.display_name],
+                run: () =>
+                    navigate(`/pr/${pr.workspace}/${pr.repo}/${pr.id}`, {state: {fromApp: true}}),
+            })),
+        [filtered, navigate],
+    );
+
+    const commandHandlers = useMemo(
+        () => ({
+            'scroll-top': () => scrollPageToTop(pageRef.current),
+        }),
+        [],
+    );
+    usePageCommands({view: 'inbox', handlers: commandHandlers, dynamic: dynamicCommands});
+    useScrollMemory(`inbox:${location.search}`, listQuery.isSuccess || prs.length > 0);
 
     function openUrl(raw: string) {
         const prUrl = extractPRUrl(raw);
@@ -155,7 +195,8 @@ export function Inbox() {
         if (next === role) {
             return;
         }
-        setParams(next === 'author' ? {role: 'author'} : {}, {replace: true});
+        lastQuery.current = filter;
+        setParams(inboxParams(next, filter), {replace: true});
     }
 
     async function refreshList() {
@@ -188,6 +229,7 @@ export function Inbox() {
             <header className="topbar">
                 <span className="brand">bb-review</span>
                 <span className="topbar-spacer" />
+                <CommandButton />
                 {meQuery.data ? (
                     <span className="me">
                         <Avatar user={meQuery.data} size={26} />
@@ -341,7 +383,7 @@ export function Inbox() {
 function PRRow({pr}: {pr: PRSummary}) {
     return (
         <li>
-            <Link className="pr-row" to={`/pr/${pr.workspace}/${pr.repo}/${pr.id}`}>
+            <Link className="pr-row" to={`/pr/${pr.workspace}/${pr.repo}/${pr.id}`} state={{fromApp: true}}>
                 <BuildDot state={pr.build_state} />
 
                 <div className="pr-row-main">

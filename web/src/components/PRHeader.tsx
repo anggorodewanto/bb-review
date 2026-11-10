@@ -1,9 +1,9 @@
 import {useMemo} from 'react';
-import {Link} from 'react-router-dom';
 import type {PRDetail, ReviewState} from '../types';
 import {relativeAge, isoTitle, plural, shortSha} from '../lib/format';
 import {sanitizeHtml} from '../lib/sanitize';
 import {Avatar, BuildDot, ReviewBadge} from './ui';
+import {CommandButton} from './CommandHost';
 
 const STATE_GLYPH: Record<ReviewState, string> = {
     approved: '✓',
@@ -16,6 +16,7 @@ export type PRHeaderProps = {
     busy: boolean;
     onApprove: () => void;
     onRequestChanges: () => void;
+    onBack: () => void;
     /** Total navigable comment threads (falls back to the PR comment count). */
     commentTotal?: number;
     onOpenComments?: () => void;
@@ -26,6 +27,7 @@ export function PRHeader({
     busy,
     onApprove,
     onRequestChanges,
+    onBack,
     commentTotal,
     onOpenComments,
 }: PRHeaderProps) {
@@ -37,13 +39,20 @@ export function PRHeader({
     return (
         <header className="pr-head">
             <div className="pr-title-row">
-                <Link className="icon-btn back-link" to="/" title="Back to inbox">
+                <button
+                    type="button"
+                    className="icon-btn back-link"
+                    onClick={onBack}
+                    title="Back to inbox"
+                    aria-label="Back to inbox"
+                >
                     ←
-                </Link>
+                </button>
                 <h1 className="pr-title">{pr.title}</h1>
                 <a className="external-link" href={pr.url} target="_blank" rel="noopener noreferrer">
                     bitbucket.org ↗
                 </a>
+                <CommandButton />
             </div>
 
             <div className="pr-meta">
@@ -60,6 +69,7 @@ export function PRHeader({
                     <button
                         type="button"
                         className="btn btn-small btn-ghost pr-comments-btn"
+                        data-command="toggle-comments"
                         onClick={onOpenComments}
                         title="Comment threads (C)"
                     >
@@ -132,6 +142,7 @@ export function PRHeader({
                     <button
                         type="button"
                         className={`btn btn-approve${approved ? ' is-active' : ''}`}
+                        data-command="approve"
                         aria-pressed={approved}
                         onClick={onApprove}
                         disabled={busy}

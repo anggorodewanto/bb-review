@@ -430,6 +430,7 @@ function FileDiffInner({
                     <label className="viewed-toggle">
                         <input
                             type="checkbox"
+                            data-command="toggle-viewed"
                             checked={viewed === 'viewed'}
                             onChange={() => onToggleViewed(entry)}
                         />

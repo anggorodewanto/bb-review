@@ -1,5 +1,7 @@
 import {useEffect} from 'react';
-import {KEYMAP_GROUPS, formatKeys} from '../lib/keymap';
+import {Link} from 'react-router-dom';
+import {allCommandGroups} from '../lib/commands';
+import {formatShortcutList} from '../lib/keymap';
 
 export function HelpOverlay({open, onClose}: {open: boolean; onClose: () => void}) {
     useEffect(() => {
@@ -36,16 +38,20 @@ export function HelpOverlay({open, onClose}: {open: boolean; onClose: () => void
                     </button>
                 </div>
                 <div className="help-groups">
-                    {KEYMAP_GROUPS.map(({group, bindings}) => (
+                    {allCommandGroups().map(({group, commands}) => (
                         <section key={group} className="help-group">
                             <h3>{group}</h3>
                             <dl>
-                                {bindings.map((binding) => (
-                                    <div key={`${binding.action}-${binding.keys.join('')}`} className="help-row">
+                                {commands.map((command) => (
+                                    <div key={command.id} className="help-row">
                                         <dt>
-                                            <kbd>{formatKeys(binding.keys)}</kbd>
+                                            {command.keys.length > 0 ? (
+                                                <kbd>{formatShortcutList(command.keys)}</kbd>
+                                            ) : (
+                                                <span className="muted">—</span>
+                                            )}
                                         </dt>
-                                        <dd>{binding.label}</dd>
+                                        <dd>{command.title}</dd>
                                     </div>
                                 ))}
                             </dl>
@@ -54,7 +60,7 @@ export function HelpOverlay({open, onClose}: {open: boolean; onClose: () => void
                 </div>
                 <p className="help-foot">
                     Shortcuts are ignored while typing in a text field. Ctrl+Enter adds a draft from the
-                    comment editor.
+                    comment editor. <Link to="/help" onClick={onClose}>Open the full help page</Link>.
                 </p>
             </div>
         </div>

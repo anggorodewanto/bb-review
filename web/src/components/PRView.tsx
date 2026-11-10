@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Link, useNavigate, useParams} from 'react-router-dom';
+import {useLocation, useNavigate, useParams} from 'react-router-dom';
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query';
 import {getChangeKey, isDelete} from 'react-diff-view';
 import type {ChangeData, HunkData, ViewType} from 'react-diff-view';
@@ -10,9 +10,13 @@ import type {FileEntry} from '../lib/diff';
 import {anchorForChange, commentCounts, groupComments} from '../lib/comments';
 import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHash} from '../lib/commentNav';
 import type {NavItem} from '../lib/commentNav';
-import {isCodeScrollTarget, prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
-import {resolveKey} from '../lib/keymap';
-import type {KeyAction} from '../lib/keymap';
+import {prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
+import type {DynamicCommand} from '../lib/commands';
+import {setCommandDetail} from '../lib/commandFeedback';
+import {lastInboxUrl} from '../lib/inboxUrl';
+import {backTarget} from '../lib/navigation';
+import {useScrollMemory} from '../lib/useScrollMemory';
+import {usePageCommands} from '../components/CommandHost';
 import {readPref, writePref} from '../lib/prefs';
 import {useMediaQuery} from '../lib/useMediaQuery';
 import type {CommentMode} from '../components/CommentEditor';
@@ -47,6 +51,7 @@ export function PRView() {
     const valid = ws.length > 0 && repo.length > 0 && Number.isInteger(prId) && prId > 0;
 
     const navigate = useNavigate();
+    const location = useLocation();
     const queryClient = useQueryClient();
 
     const prKey = useMemo(() => ['pr', ws, repo, prId] as const, [ws, repo, prId]);
@@ -149,7 +154,6 @@ export function PRView() {
     const [commentsOpen, setCommentsOpen] = useState(false);
     const [activeNavId, setActiveNavId] = useState<string | null>(null);
     const [reveal, setReveal] = useState<{fileIndex: number; nonce: number} | null>(null);
-    const [navToast, setNavToast] = useState<{text: string; nonce: number} | null>(null);
 
     const viewType: ViewType = forceUnified ? 'unified' : viewPref;
 
@@ -166,7 +170,6 @@ export function PRView() {
     editorRef.current = editor;
     const fileRefs = useRef<Array<HTMLElement | null>>([]);
     const hunkCursor = useRef<{fileIndex: number; hunk: number}>({fileIndex: -1, hunk: -1});
-    const pendingChord = useRef<string | null>(null);
     const pageRef = useRef<HTMLDivElement | null>(null);
     const navItemsRef = useRef<NavItem[]>(navItems);
     navItemsRef.current = navItems;
@@ -279,7 +282,7 @@ export function PRView() {
             }
             navCursor.current = next;
             jumpToItem(item);
-            setNavToast({text: `${next + 1}/${items.length}`, nonce: Date.now()});
+            setCommandDetail(`${next + 1}/${items.length}`);
         },
         [jumpToItem],
     );
@@ -635,7 +638,7 @@ export function PRView() {
         }
     }, [queryClient, viewedKey, putViewedMutation.mutate, scrollToFile]);
 
-    const actions = useMemo<Record<KeyAction, () => void>>(
+    const handlers = useMemo<Record<string, () => void>>(
         () => ({
             'next-file': () => scrollToFile(Math.min(filesRef.current.length - 1, currentIndexRef.current + 1)),
             'prev-file': () => scrollToFile(Math.max(0, currentIndexRef.current - 1)),
@@ -654,7 +657,7 @@ export function PRView() {
             'toggle-tree': toggleTree,
             'toggle-split': toggleView,
             'toggle-wrap': toggleWrap,
-            inbox: () => navigate('/'),
+            'inbox': () => navigate(lastInboxUrl()),
             help: () => setHelpOpen(true),
             escape: () => {
                 setEditor(null);
@@ -679,16 +682,36 @@ export function PRView() {
             navigate,
         ],
     );
-    const actionsRef = useRef(actions);
-    actionsRef.current = actions;
 
-    useEffect(() => {
-        if (!navToast) {
+    const dynamicCommands = useMemo<DynamicCommand[]>(
+        () =>
+            files.map((entry, index) => ({
+                id: `file-${index}`,
+                title: `Go to file: ${entry.path}`,
+                section: 'files',
+                search: [entry.path],
+                run: () => scrollToFile(index),
+            })),
+        [files, scrollToFile],
+    );
+
+    usePageCommands({
+        view: 'pr',
+        handlers,
+        hasFocus: focus !== null,
+        hasFiles: files.length > 0,
+        dynamic: dynamicCommands,
+    });
+
+    useScrollMemory(`pr:${ws}/${repo}/${prId}`, Boolean(pr));
+
+    const goBack = useCallback(() => {
+        if (backTarget(location.state).kind === 'back') {
+            navigate(-1);
             return;
         }
-        const timer = window.setTimeout(() => setNavToast(null), 1400);
-        return () => window.clearTimeout(timer);
-    }, [navToast]);
+        navigate('/');
+    }, [location.state, navigate]);
 
     // Bitbucket links use #comment-<id>; jump once the comments have loaded.
     useEffect(() => {
@@ -716,37 +739,6 @@ export function PRView() {
         }
         jumpToItem(item);
     }, [navItems, jumpToItem]);
-
-    useEffect(() => {
-        function onKeyDown(event: KeyboardEvent) {
-            const result = resolveKey(
-                {
-                    key: event.key,
-                    ctrlKey: event.ctrlKey,
-                    metaKey: event.metaKey,
-                    altKey: event.altKey,
-                    target: event.target,
-                },
-                pendingChord.current,
-            );
-            pendingChord.current = result.pending;
-            if (!result.action) {
-                return;
-            }
-            if (result.action === 'scroll-top' && event.key === 'Home' && isCodeScrollTarget(event.target)) {
-                return;
-            }
-            const handler = actionsRef.current[result.action];
-            if (!handler) {
-                return;
-            }
-            event.preventDefault();
-            handler();
-        }
-
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, []);
 
     // --- render -------------------------------------------------------------
     if (!valid) {
@@ -819,27 +811,46 @@ export function PRView() {
                     busy={busyReview}
                     onApprove={toggleApprove}
                     onRequestChanges={toggleRequestChanges}
+                    onBack={goBack}
                     commentTotal={navItems.length}
                     onOpenComments={() => setCommentsOpen((open) => !open)}
                 />
 
                 <div className="pr-toolbar">
-                    <button type="button" className="btn btn-small tree-toggle" onClick={toggleTree}>
+                    <button
+                        type="button"
+                        className="btn btn-small tree-toggle"
+                        data-command="toggle-tree"
+                        onClick={toggleTree}
+                    >
                         Files
                     </button>
-                    <button type="button" className="btn btn-small" onClick={toggleView} title="Toggle split / unified (u)">
+                    <button
+                        type="button"
+                        className="btn btn-small"
+                        data-command="toggle-split"
+                        onClick={toggleView}
+                        title="Toggle split / unified (u)"
+                    >
                         {viewType === 'split' ? 'Unified' : 'Split'}
                     </button>
                     <button
                         type="button"
                         className="btn btn-small"
+                        data-command="toggle-wrap"
                         onClick={toggleWrap}
                         aria-pressed={wrapLines}
                         title="Toggle line wrapping (w)"
                     >
                         Wrap lines
                     </button>
-                    <button type="button" className="btn btn-small" onClick={() => setHelpOpen(true)} title="Keyboard help (?)">
+                    <button
+                        type="button"
+                        className="btn btn-small"
+                        data-command="help"
+                        onClick={() => setHelpOpen(true)}
+                        title="Keyboard help (?)"
+                    >
                         ?
                     </button>
                     <span className="toolbar-spacer" />
@@ -919,7 +930,9 @@ export function PRView() {
                 />
 
                 <p className="pr-foot">
-                    <Link to="/">← Back to inbox</Link>
+                    <button type="button" className="btn btn-small btn-ghost" onClick={goBack}>
+                        ← Back to inbox
+                    </button>
                     <span className="sep">·</span>
                     <button type="button" className="btn btn-small btn-ghost" onClick={() => setHelpOpen(true)}>
                         Keyboard shortcuts (?)
@@ -942,6 +955,7 @@ export function PRView() {
                     <button
                         type="button"
                         className="float-btn float-next-comment"
+                        data-command="next-comment"
                         onClick={() => goComment(1)}
                         title="Next comment (])"
                         aria-label="Next comment"
@@ -950,12 +964,6 @@ export function PRView() {
                     </button>
                 ) : null}
             </div>
-
-            {navToast ? (
-                <div className="comment-nav-toast" role="status" aria-live="polite">
-                    {navToast.text}
-                </div>
-            ) : null}
 
             <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
         </div>

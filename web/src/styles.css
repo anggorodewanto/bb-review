@@ -1973,21 +1973,268 @@ kbd {
     font-size: 16px;
 }
 
-.comment-nav-toast {
+/* --- command palette, help page, command feedback ----------------------- */
+
+.command-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 0 10px;
+    flex: none;
+}
+
+.command-btn-icon {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.command-btn-label {
+    font-size: 12.5px;
+}
+
+.command-overlay {
+    align-items: flex-start;
+    padding: 10vh 12px 12px;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.command-palette {
+    display: flex;
+    flex-direction: column;
+    width: min(640px, calc(100vw - 24px));
+    max-height: 72vh;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+}
+
+.command-input {
+    width: 100%;
+    min-height: 48px;
+    padding: 12px 14px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 15px;
+}
+
+.command-input:focus {
+    outline: none;
+}
+
+.command-results {
+    flex: 1;
+    min-height: 0;
+    padding: 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.command-section-title {
+    padding: 8px 10px 4px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.command-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.command-option.is-active {
+    border-color: var(--accent);
+    background: var(--surface-2);
+}
+
+.command-option.is-disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.command-option-main {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.command-option-title {
+    overflow: hidden;
+    font-size: 13.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.command-option-group {
+    color: var(--muted);
+    font-size: 11.5px;
+}
+
+.command-match {
+    color: var(--accent);
+}
+
+.command-option kbd {
+    flex: none;
+}
+
+.command-empty {
+    padding: 16px 12px;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.command-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11.5px;
+}
+
+.command-foot-hint {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.command-toast {
     position: fixed;
     left: 50%;
     bottom: calc(84px + env(safe-area-inset-bottom, 0px));
-    z-index: 70;
-    transform: translateX(-50%);
-    padding: 6px 14px;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100vw - 24px);
+    padding: 7px 14px;
     border-radius: 999px;
     background: var(--surface-3);
     color: var(--text);
-    font-size: 12.5px;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
     box-shadow: var(--shadow);
+    font-size: 12.5px;
+    transform: translateX(-50%);
     pointer-events: none;
+}
+
+.command-toast-title {
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.command-toast.is-new {
+    animation: command-toast-in 0.16s ease-out;
+}
+
+@keyframes command-toast-in {
+    from {
+        opacity: 0;
+        transform: translate(-50%, 4px);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+    }
+}
+
+.command-toast-count,
+.command-toast-detail {
+    flex: none;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+[data-command][data-command-flash] {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    animation: command-glow 0.6s ease-out;
+}
+
+@keyframes command-glow {
+    from {
+        box-shadow: 0 0 0 3px var(--accent);
+    }
+    to {
+        box-shadow: 0 0 0 8px rgba(0, 0, 0, 0);
+    }
+}
+
+/* Help page */
+
+.help-page {
+    max-width: 900px;
+}
+
+.help-intro h1 {
+    margin: 8px 0 4px;
+    font-size: 24px;
+}
+
+.help-search {
+    width: 100%;
+    max-width: 420px;
+    margin-top: 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+}
+
+.help-reference {
+    display: grid;
+    gap: 18px;
+    margin: 18px 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+
+.help-reference .help-group h2 {
+    margin: 0 0 6px;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.help-section {
+    margin: 18px 0;
+}
+
+.help-section h2 {
+    margin: 0 0 6px;
+    font-size: 15px;
+}
+
+.help-section p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.55;
 }
 
 /* --- responsive --------------------------------------------------------- */
@@ -2130,7 +2377,7 @@ kbd {
         bottom: 16px;
     }
 
-    .comment-nav-toast {
+    .command-toast {
         bottom: 24px;
     }
 
@@ -2177,6 +2424,27 @@ kbd {
 @media (max-width: 699px) {
     .btn {
         min-height: 40px;
+    }
+
+    .command-btn {
+        min-width: 44px;
+        min-height: 44px;
+        justify-content: center;
+        padding: 0;
+    }
+
+    .command-btn-label {
+        display: none;
+    }
+
+    .command-overlay {
+        padding: 0;
+    }
+
+    .command-palette {
+        width: 100%;
+        max-height: 88vh;
+        border-radius: 0 0 12px 12px;
     }
 
     .btn-small {

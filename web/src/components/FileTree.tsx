@@ -183,6 +183,7 @@ export function FileTree({
                             <input
                                 type="checkbox"
                                 className="viewed-check"
+                                data-command="toggle-viewed"
                                 checked={status === 'viewed'}
                                 onChange={() => onToggleViewed(entry)}
                                 aria-label={`Mark ${entry.path} viewed`}

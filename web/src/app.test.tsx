@@ -111,12 +111,18 @@ afterEach(() => {
 });
 
 function renderAt(path: string) {
+    return renderAtEntries([path]);
+}
+
+type RouteEntry = string | {pathname: string; search?: string; state?: unknown};
+
+function renderAtEntries(entries: RouteEntry[]) {
     const client = new QueryClient({
         defaultOptions: {queries: {retry: false, gcTime: 0}},
     });
     return render(
         <QueryClientProvider client={client}>
-            <MemoryRouter initialEntries={[path]} future={{v7_startTransition: true, v7_relativeSplatPath: true}}>
+            <MemoryRouter initialEntries={entries} future={{v7_startTransition: true, v7_relativeSplatPath: true}}>
                 <App />
             </MemoryRouter>
         </QueryClientProvider>,
@@ -255,5 +261,100 @@ describe('app smoke', () => {
                 }),
             ).toBe(true);
         });
+    });
+});
+
+describe('command palette', () => {
+    it('opens with Ctrl+K, filters and runs a command', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-wrap'));
+
+        fireEvent.keyDown(window, {key: 'k', ctrlKey: true});
+
+        const dialog = await screen.findByRole('dialog', {name: 'Command palette'});
+        const input = dialog.querySelector('input');
+        expect(input).not.toBeNull();
+        fireEvent.change(input!, {target: {value: 'line wrapping'}});
+        fireEvent.keyDown(input!, {key: 'Enter'});
+
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-nowrap'));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+        const wrapButton = screen.getByRole('button', {name: 'Wrap lines'});
+        expect(wrapButton).toHaveAttribute('data-command-flash');
+    });
+
+    it('closes with Escape', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.keyDown(window, {key: 'k', ctrlKey: true});
+        const input = await screen.findByRole('combobox', {name: 'Search commands'});
+        fireEvent.keyDown(input, {key: 'Escape'});
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('marks commands unavailable on this page', async () => {
+        renderAt('/');
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.keyDown(window, {key: 'k', ctrlKey: true});
+        const input = await screen.findByRole('combobox', {name: 'Search commands'});
+        fireEvent.change(input, {target: {value: 'next file'}});
+        expect(await screen.findByText('Not available here')).toBeInTheDocument();
+    });
+});
+
+describe('help page', () => {
+    it('renders the shortcut reference and guidance sections', async () => {
+        renderAt('/help');
+        expect(await screen.findByRole('heading', {name: 'Help', level: 1})).toBeInTheDocument();
+        expect(screen.getByText('Toggle line wrapping')).toBeInTheDocument();
+        expect(screen.getByText('Reviewing a PR')).toBeInTheDocument();
+        expect(screen.getByText('How the To-review list is found')).toBeInTheDocument();
+    });
+
+    it('filters the shortcut list', async () => {
+        renderAt('/help');
+        await screen.findByRole('heading', {name: 'Help', level: 1});
+        fireEvent.change(screen.getByRole('searchbox', {name: 'Search shortcuts'}), {
+            target: {value: 'wrapping'},
+        });
+        expect(screen.getByText('Toggle line wrapping')).toBeInTheDocument();
+        expect(screen.queryByText('Toggle approve')).not.toBeInTheDocument();
+    });
+});
+
+describe('navigation state', () => {
+    it('g i returns to the remembered inbox URL', async () => {
+        renderAt('/?tab=mine&q=diff');
+        await screen.findByText('Improve the diff viewer');
+        fireEvent.click(screen.getByText('Improve the diff viewer'));
+        await screen.findByText('Nice change');
+
+        fireEvent.keyDown(window, {key: 'g'});
+        fireEvent.keyDown(window, {key: 'i'});
+
+        await waitFor(() =>
+            expect(screen.getByRole('tab', {name: 'Mine'})).toHaveAttribute('aria-selected', 'true'),
+        );
+        expect(screen.getByRole('searchbox', {name: 'Filter pull requests'})).toHaveValue('diff');
+    });
+
+    it('uses history when the PR was opened in-app', async () => {
+        renderAtEntries([
+            {pathname: '/help'},
+            {pathname: '/pr/ws/repo/1', state: {fromApp: true}},
+        ]);
+        await screen.findByText('Nice change');
+        fireEvent.click(screen.getByRole('button', {name: 'Back to inbox'}));
+        expect(await screen.findByRole('heading', {name: 'Help', level: 1})).toBeInTheDocument();
+    });
+
+    it('falls back to the inbox without in-app history', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Nice change');
+        fireEvent.click(screen.getByRole('button', {name: 'Back to inbox'}));
+        expect(await screen.findByText('Improve the diff viewer')).toBeInTheDocument();
+        expect(screen.getByRole('tab', {name: 'To review'})).toBeInTheDocument();
     });
 });
