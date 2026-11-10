@@ -212,11 +212,11 @@ func TestReviewPRsQueryPaginationAndMapping(t *testing.T) {
 		t.Fatal("no query recorded")
 	}
 	parsed := mustParseQuery(t, queries[0])
-	if got, want := parsed.Get("q"), `reviewers.uuid="uuid-me"`; got != want {
+	if got, want := parsed.Get("q"), `reviewers.uuid="uuid-me" AND state="OPEN"`; got != want {
 		t.Fatalf("q = %q, want %q", got, want)
 	}
-	if got := parsed.Get("state"); got != "OPEN" {
-		t.Fatalf("state = %q", got)
+	if got := parsed.Get("state"); got != "" {
+		t.Fatalf("state must be inside q (Bitbucket ignores it alongside q), got %q", got)
 	}
 	if got := parsed.Get("pagelen"); got != "50" {
 		t.Fatalf("pagelen = %q", got)

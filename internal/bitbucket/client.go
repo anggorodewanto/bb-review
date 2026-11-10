@@ -184,10 +184,11 @@ func (c *Client) AuthorPRs(ctx context.Context, workspace, state string) ([]PRSu
 // listRepoPRs fetches every page of one repo's pull request list. It returns the
 // summaries plus each PR's source commit hash (empty when the API omitted it).
 func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID string) ([]PRSummary, []string, error) {
+	// Bitbucket ignores the state parameter whenever q is present, so the state
+	// filter must live inside q or merged/declined PRs come back too.
 	values := url.Values{}
-	values.Set("state", state)
 	values.Set("pagelen", "50")
-	values.Set("q", q)
+	values.Set("q", withState(q, state))
 	values.Set("fields", "+values.participants")
 
 	var prs []PRSummary
@@ -211,6 +212,18 @@ func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID st
 		hashes = []string{}
 	}
 	return prs, hashes, nil
+}
+
+// withState adds a state="..." clause to a BBQL query.
+func withState(q, state string) string {
+	if state == "" {
+		return q
+	}
+	clause := fmt.Sprintf(`state="%s"`, state)
+	if q == "" {
+		return clause
+	}
+	return q + " AND " + clause
 }
 
 // DiscoverActiveRepos lists the repos updated inside the active window, sorted by
