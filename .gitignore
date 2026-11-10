@@ -1,0 +1,11 @@
+# build output
+/bin/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/node_modules/
+*.log
+# local config / secrets — never commit
+config.json
+.env
+*.local
+.oc-worktrees/
