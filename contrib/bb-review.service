@@ -1,0 +1,12 @@
+[Unit]
+Description=bb-review (Bitbucket PR review UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/projects/bb-review/bin/bb-review
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

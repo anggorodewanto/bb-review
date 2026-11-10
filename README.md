@@ -34,6 +34,17 @@ One Go binary with the React app embedded. It runs on your machine, so your API 
 
    Open <http://localhost:7777>.
 
+## Start on boot (Linux, systemd)
+
+```sh
+cp contrib/bb-review.service ~/.config/systemd/user/   # adjust ExecStart if the repo lives elsewhere
+systemctl --user daemon-reload
+systemctl --user enable --now bb-review
+loginctl enable-linger "$USER"   # start at boot, before you log in
+```
+
+After rebuilding, run `systemctl --user restart bb-review`. Logs: `journalctl --user -u bb-review -f`.
+
 ## Phone access with Tailscale
 
 ```sh
