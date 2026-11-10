@@ -49,6 +49,10 @@ function renderDiff(overrides: {focusedKey?: string | null; expand?: {nonce: num
             registerRef={() => undefined}
             reveal={null}
             expand={overrides.expand ?? null}
+            markdownPath={null}
+            rendered={false}
+            onToggleRendered={() => undefined}
+            markdownContext={null}
         />,
     );
 }

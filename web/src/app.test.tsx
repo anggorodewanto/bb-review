@@ -14,6 +14,15 @@ index 1111111..2222222 100644
 +added line
  line2
  line3
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,3 @@
++# Readme
++
++hello markdown
 `;
 
 const USER: User = {
@@ -76,6 +85,7 @@ function fakeResponse(body: unknown, contentType = 'application/json'): Response
 
 beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
     vi.stubGlobal(
         'fetch',
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,6 +105,9 @@ beforeEach(() => {
             }
             if (url.startsWith('/api/me')) return fakeResponse(USER);
             if (url.startsWith('/api/prs?')) return fakeResponse([DETAIL]);
+            if (url.includes('/api/file/')) {
+                return fakeResponse('# Readme\n\nhello markdown\n', 'text/plain');
+            }
             if (url.endsWith('/diff')) return fakeResponse(DIFF, 'text/plain');
             if (url.endsWith('/comments')) return fakeResponse([COMMENT]);
             if (url.endsWith('/drafts')) return fakeResponse([]);
@@ -301,6 +314,38 @@ describe('command palette', () => {
         const input = await screen.findByRole('combobox', {name: 'Search commands'});
         fireEvent.change(input, {target: {value: 'next file'}});
         expect(await screen.findByText('Not available here')).toBeInTheDocument();
+    });
+});
+
+describe('rendered Markdown', () => {
+    it('toggles a Markdown file with r and remembers the choice', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        await screen.findByText('README.md', {selector: '.file-block-path'});
+
+        fireEvent.keyDown(window, {key: 'j'});
+        fireEvent.keyDown(window, {key: 'r'});
+
+        expect(await screen.findByText('hello markdown')).toBeInTheDocument();
+        const toggle = screen.getByRole('button', {name: 'Rendered ✓'});
+        expect(toggle).toHaveAttribute('aria-pressed', 'true');
+        expect(window.sessionStorage.getItem('bb-review:rendered:ws/repo/1')).toContain(
+            'README.md',
+        );
+    });
+
+    it('does nothing for non-Markdown files', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        await screen.findByText('README.md', {selector: '.file-block-path'});
+
+        fireEvent.keyDown(window, {key: 'r'});
+
+        expect(document.querySelector('.md-file')).toBeNull();
+        expect(screen.getByRole('button', {name: 'Rendered'})).toHaveAttribute(
+            'aria-pressed',
+            'false',
+        );
     });
 });
 

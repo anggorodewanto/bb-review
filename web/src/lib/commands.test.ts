@@ -41,6 +41,7 @@ describe('command registry', () => {
         expect(keysFor('toggle-wrap')).toEqual(['w']);
         expect(keysFor('expand-context')).toEqual(['e']);
         expect(keysFor('expand-context-all')).toEqual(['E']);
+        expect(keysFor('toggle-rendered')).toEqual(['r']);
         expect(keysFor('next-comment')).toEqual([']']);
         expect(keysFor('toggle-comments')).toEqual(['C']);
         expect(keysFor('scroll-top')).toEqual(['g g', 'Home']);
@@ -84,6 +85,28 @@ describe('command availability', () => {
         expect(isCommandEnabled(COMMAND_BY_ID.get('help')!, help)).toBe(false);
         expect(isCommandEnabled(COMMAND_BY_ID.get('help-page')!, help)).toBe(false);
         expect(isCommandEnabled(COMMAND_BY_ID.get('inbox')!, help)).toBe(true);
+    });
+
+    it('enables Markdown commands only when they apply', () => {
+        const plain = makeCommandContext('pr', {hasFiles: true});
+        expect(isCommandEnabled(COMMAND_BY_ID.get('toggle-rendered')!, plain)).toBe(false);
+        expect(isCommandEnabled(COMMAND_BY_ID.get('render-all-markdown')!, plain)).toBe(false);
+
+        const markdown = makeCommandContext('pr', {
+            hasFiles: true,
+            hasMarkdown: true,
+            currentFileMarkdown: true,
+        });
+        expect(isCommandEnabled(COMMAND_BY_ID.get('toggle-rendered')!, markdown)).toBe(true);
+        expect(isCommandEnabled(COMMAND_BY_ID.get('render-all-markdown')!, markdown)).toBe(true);
+        expect(isCommandEnabled(COMMAND_BY_ID.get('show-markdown-diffs')!, markdown)).toBe(false);
+
+        const rendered = makeCommandContext('pr', {
+            hasFiles: true,
+            hasMarkdown: true,
+            hasRenderedMarkdown: true,
+        });
+        expect(isCommandEnabled(COMMAND_BY_ID.get('show-markdown-diffs')!, rendered)).toBe(true);
     });
 
     it('groups every command exactly once', () => {

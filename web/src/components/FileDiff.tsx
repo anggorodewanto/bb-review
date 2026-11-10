@@ -26,6 +26,8 @@ import type {ThreadActions} from './CommentThread';
 import {CommentThread, DraftCard} from './CommentThread';
 import {CommentEditor} from './CommentEditor';
 import type {CommentMode} from './CommentEditor';
+import {MarkdownFile} from './MarkdownFile';
+import type {MarkdownContext} from './MarkdownFile';
 
 const LARGE_FILE_THRESHOLD = 1500;
 
@@ -52,6 +54,12 @@ export type FileDiffProps = {
     reveal: number | null;
     /** Keyboard request (`e` / `E`) for the focused line in this file. */
     expand: {nonce: number; all: boolean} | null;
+    /** Path when this file can be rendered as Markdown, else null. */
+    markdownPath: string | null;
+    /** Markdown files show the rendered view instead of the diff. */
+    rendered: boolean;
+    onToggleRendered: (path: string) => void;
+    markdownContext: MarkdownContext | null;
 };
 
 function changeId(index: number, change: ChangeData): string {
@@ -138,6 +146,10 @@ function FileDiffInner({
     registerRef,
     reveal,
     expand,
+    markdownPath,
+    rendered,
+    onToggleRendered,
+    markdownContext,
 }: FileDiffProps) {
     const sectionRef = useRef<HTMLElement | null>(null);
     const [active, setActive] = useState(false);
@@ -201,8 +213,9 @@ function FileDiffInner({
 
     const language = languageForPath(entry.path);
     const large = entry.changedLines > LARGE_FILE_THRESHOLD;
+    const showRendered = rendered && markdownPath !== null && markdownContext !== null;
     const showDiff =
-        active && hunks.length > 0 && !entry.isBinary && (!large || loadedLarge);
+        !showRendered && active && hunks.length > 0 && !entry.isBinary && (!large || loadedLarge);
 
     const tokens = useMemo(() => {
         if (!showDiff || !language) {
@@ -514,6 +527,18 @@ function FileDiffInner({
                     ) : null}
                 </div>
                 <div className="file-block-meta">
+                    {markdownPath ? (
+                        <button
+                            type="button"
+                            className={`btn btn-small rendered-toggle${rendered ? ' is-active' : ''}`}
+                            data-command="toggle-rendered"
+                            aria-pressed={rendered}
+                            onClick={() => onToggleRendered(markdownPath)}
+                            title="Show the rendered Markdown (r)"
+                        >
+                            {rendered ? 'Rendered ✓' : 'Rendered'}
+                        </button>
+                    ) : null}
                     <span className="diffstat">
                         {entry.additions > 0 ? <span className="add">+{entry.additions}</span> : null}
                         {entry.deletions > 0 ? <span className="del">-{entry.deletions}</span> : null}
@@ -535,76 +560,82 @@ function FileDiffInner({
                 </div>
             </header>
 
-            {entry.isBinary ? (
-                <p className="file-note">Binary file — diff not shown.</p>
-            ) : null}
+            {showRendered && markdownContext ? (
+                <MarkdownFile entry={entry} context={markdownContext} />
+            ) : (
+                <>
+                    {entry.isBinary ? (
+                        <p className="file-note">Binary file — diff not shown.</p>
+                    ) : null}
 
-            {!entry.isBinary && entry.hunks.length === 0 ? (
-                <p className="file-note">No textual changes in this file.</p>
-            ) : null}
+                    {!entry.isBinary && entry.hunks.length === 0 ? (
+                        <p className="file-note">No textual changes in this file.</p>
+                    ) : null}
 
-            {!entry.isBinary && large && !loadedLarge ? (
-                <div className="file-note file-large">
-                    <p>
-                        Large file: {plural(entry.changedLines, 'changed line')}. Rendering is deferred to
-                        keep scrolling smooth.
-                    </p>
-                    <button type="button" className="btn" onClick={() => setLoadedLarge(true)}>
-                        Load diff
-                    </button>
-                </div>
-            ) : null}
+                    {!entry.isBinary && large && !loadedLarge ? (
+                        <div className="file-note file-large">
+                            <p>
+                                Large file: {plural(entry.changedLines, 'changed line')}. Rendering is
+                                deferred to keep scrolling smooth.
+                            </p>
+                            <button type="button" className="btn" onClick={() => setLoadedLarge(true)}>
+                                Load diff
+                            </button>
+                        </div>
+                    ) : null}
 
-            {expandError ? <p className="form-error file-note">{expandError}</p> : null}
+                    {expandError ? <p className="form-error file-note">{expandError}</p> : null}
 
-            {entry.isBinary || entry.hunks.length === 0 ? null : !active ? (
-                <p className="file-note file-placeholder">Preparing diff…</p>
-            ) : !showDiff ? null : (
-                <div className="diff-scroll">
-                    <Diff
-                        viewType={viewType}
-                        className={wrap ? 'diff-wrap' : 'diff-nowrap'}
-                        diffType={entry.type}
-                        hunks={hunks}
-                        tokens={tokens}
-                        widgets={widgets}
-                        generateAnchorID={generateAnchorID}
-                        generateLineClassName={generateLineClassName}
-                        codeEvents={{onClick: gutterClick}}
-                        gutterEvents={{onClick: gutterClick}}
-                    >
-                        {(rendered) => renderHunks(rendered)}
-                    </Diff>
-                </div>
+                    {entry.isBinary || entry.hunks.length === 0 ? null : !active ? (
+                        <p className="file-note file-placeholder">Preparing diff…</p>
+                    ) : !showDiff ? null : (
+                        <div className="diff-scroll">
+                            <Diff
+                                viewType={viewType}
+                                className={wrap ? 'diff-wrap' : 'diff-nowrap'}
+                                diffType={entry.type}
+                                hunks={hunks}
+                                tokens={tokens}
+                                widgets={widgets}
+                                generateAnchorID={generateAnchorID}
+                                generateLineClassName={generateLineClassName}
+                                codeEvents={{onClick: gutterClick}}
+                                gutterEvents={{onClick: gutterClick}}
+                            >
+                                {(rendered) => renderHunks(rendered)}
+                            </Diff>
+                        </div>
+                    )}
+
+                    {groups.outdated.length > 0 || draftGroups.unmapped.length > 0 ? (
+                        <details className="outdated" open={false}>
+                            <summary>
+                                Outdated comments (
+                                {groups.outdated.length + draftGroups.unmapped.length})
+                            </summary>
+                            <div className="outdated-body">
+                                {groups.outdated.map((thread) => (
+                                    <CommentThread
+                                        key={`outdated-${thread.root.id}`}
+                                        id={`comment-${thread.root.id}`}
+                                        thread={thread}
+                                        replyDrafts={draftReplies.get(thread.root.id) ?? []}
+                                        actions={actions}
+                                    />
+                                ))}
+                                {draftGroups.unmapped.map((draft) => (
+                                    <DraftCard
+                                        key={`outdated-draft-${draft.id}`}
+                                        id={`comment-draft-${draft.id}`}
+                                        draft={draft}
+                                        actions={actions}
+                                    />
+                                ))}
+                            </div>
+                        </details>
+                    ) : null}
+                </>
             )}
-
-            {groups.outdated.length > 0 || draftGroups.unmapped.length > 0 ? (
-                <details className="outdated" open={false}>
-                    <summary>
-                        Outdated comments (
-                        {groups.outdated.length + draftGroups.unmapped.length})
-                    </summary>
-                    <div className="outdated-body">
-                        {groups.outdated.map((thread) => (
-                            <CommentThread
-                                key={`outdated-${thread.root.id}`}
-                                id={`comment-${thread.root.id}`}
-                                thread={thread}
-                                replyDrafts={draftReplies.get(thread.root.id) ?? []}
-                                actions={actions}
-                            />
-                        ))}
-                        {draftGroups.unmapped.map((draft) => (
-                            <DraftCard
-                                key={`outdated-draft-${draft.id}`}
-                                id={`comment-draft-${draft.id}`}
-                                draft={draft}
-                                actions={actions}
-                            />
-                        ))}
-                    </div>
-                </details>
-            ) : null}
         </section>
     );
 }

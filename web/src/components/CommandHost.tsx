@@ -16,6 +16,9 @@ export type PageCommands = {
     handlers: Record<string, (() => void) | undefined>;
     hasFocus?: boolean;
     hasFiles?: boolean;
+    hasMarkdown?: boolean;
+    currentFileMarkdown?: boolean;
+    hasRenderedMarkdown?: boolean;
     dynamic?: DynamicCommand[];
 };
 
@@ -72,6 +75,9 @@ export function CommandHostProvider({children}: {children: ReactNode}) {
             view: page?.view ?? 'help',
             hasFocus: page?.hasFocus ?? false,
             hasFiles: page?.hasFiles ?? false,
+            hasMarkdown: page?.hasMarkdown ?? false,
+            currentFileMarkdown: page?.currentFileMarkdown ?? false,
+            hasRenderedMarkdown: page?.hasRenderedMarkdown ?? false,
             dispatch: (id: string) => {
                 page?.handlers[id]?.();
             },
@@ -224,6 +230,9 @@ export function usePageCommands(page: PageCommands): CommandHost {
             const ctx = makeCommandContext(current.view, {
                 hasFocus: current.hasFocus ?? false,
                 hasFiles: current.hasFiles ?? false,
+                hasMarkdown: current.hasMarkdown ?? false,
+                currentFileMarkdown: current.currentFileMarkdown ?? false,
+                hasRenderedMarkdown: current.hasRenderedMarkdown ?? false,
                 navigate: (to) => navigate(to),
             });
             if (!command.when(ctx)) {
@@ -261,6 +270,9 @@ export function usePageCommands(page: PageCommands): CommandHost {
             const ctx = makeCommandContext(pageRef.current.view, {
                 hasFocus: pageRef.current.hasFocus ?? false,
                 hasFiles: pageRef.current.hasFiles ?? false,
+                hasMarkdown: pageRef.current.hasMarkdown ?? false,
+                currentFileMarkdown: pageRef.current.currentFileMarkdown ?? false,
+                hasRenderedMarkdown: pageRef.current.hasRenderedMarkdown ?? false,
                 navigate: (to) => navigate(to),
             });
             if (!command.when(ctx)) {

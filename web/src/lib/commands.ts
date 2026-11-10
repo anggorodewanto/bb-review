@@ -27,6 +27,9 @@ export type CommandId =
     | 'toggle-split'
     | 'toggle-wrap'
     | 'toggle-comments'
+    | 'toggle-rendered'
+    | 'render-all-markdown'
+    | 'show-markdown-diffs'
     | 'expand-context'
     | 'expand-context-all'
     | 'help'
@@ -39,6 +42,12 @@ export type CommandContext = {
     hasFocus: boolean;
     /** PR view: the diff has files. */
     hasFiles: boolean;
+    /** PR view: the diff contains at least one Markdown file. */
+    hasMarkdown: boolean;
+    /** PR view: the file under the reading line is Markdown. */
+    currentFileMarkdown: boolean;
+    /** PR view: at least one Markdown file is shown rendered. */
+    hasRenderedMarkdown: boolean;
     /** Run a command implemented by the current page. */
     dispatch: (id: string) => void;
     navigate: (to: string) => void;
@@ -258,6 +267,30 @@ export const COMMANDS: Command[] = [
         run: dispatch('expand-context-all'),
     },
     {
+        id: 'toggle-rendered',
+        title: 'Toggle rendered Markdown',
+        group: 'View',
+        keys: [['r']],
+        when: (ctx) => ctx.view === 'pr' && ctx.currentFileMarkdown,
+        run: dispatch('toggle-rendered'),
+    },
+    {
+        id: 'render-all-markdown',
+        title: 'Render all Markdown files',
+        group: 'View',
+        keys: [],
+        when: (ctx) => ctx.view === 'pr' && ctx.hasMarkdown,
+        run: dispatch('render-all-markdown'),
+    },
+    {
+        id: 'show-markdown-diffs',
+        title: 'Show diffs for all Markdown files',
+        group: 'View',
+        keys: [],
+        when: (ctx) => ctx.view === 'pr' && ctx.hasMarkdown && ctx.hasRenderedMarkdown,
+        run: dispatch('show-markdown-diffs'),
+    },
+    {
         id: 'help',
         title: 'Keyboard shortcuts',
         group: 'General',
@@ -314,6 +347,9 @@ export function makeCommandContext(
         view,
         hasFocus: false,
         hasFiles: false,
+        hasMarkdown: false,
+        currentFileMarkdown: false,
+        hasRenderedMarkdown: false,
         dispatch: () => undefined,
         navigate: () => undefined,
         openPalette: () => undefined,

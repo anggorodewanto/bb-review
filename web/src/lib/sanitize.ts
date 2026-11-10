@@ -23,6 +23,13 @@ function installHooks(): void {
         if (node.tagName !== 'A' || !node.getAttribute('href')) {
             return;
         }
+        const href = node.getAttribute('href') ?? '';
+        if (href.startsWith('#')) {
+            // In-page anchors scroll inside the rendered Markdown.
+            node.removeAttribute('target');
+            node.removeAttribute('rel');
+            return;
+        }
         node.setAttribute('target', '_blank');
         node.setAttribute('rel', 'noopener noreferrer nofollow');
     });

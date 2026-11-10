@@ -12,7 +12,15 @@ import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHas
 import type {NavItem} from '../lib/commentNav';
 import {prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
 import {fileIndexAtLine, nextNavTarget, prevFileTarget} from '../lib/fileNav';
+import {isMarkdownPath} from '../lib/markdown';
+import {
+    readRenderedPaths,
+    renderedStorageKey,
+    setPathRendered,
+    writeRenderedPaths,
+} from '../lib/rendered';
 import type {DynamicCommand} from '../lib/commands';
+import type {MarkdownContext} from '../components/MarkdownFile';
 import {setCommandDetail} from '../lib/commandFeedback';
 import {lastInboxUrl} from '../lib/inboxUrl';
 import {backTarget} from '../lib/navigation';
@@ -161,6 +169,10 @@ export function PRView() {
         nonce: number;
         all: boolean;
     } | null>(null);
+    const renderedKey = renderedStorageKey(ws, repo, prId);
+    const [renderedPaths, setRenderedPaths] = useState<Record<string, boolean>>(() =>
+        readRenderedPaths(renderedKey),
+    );
 
     const viewType: ViewType = forceUnified ? 'unified' : viewPref;
 
@@ -194,6 +206,8 @@ export function PRView() {
     const navSettleTimer = useRef<number | null>(null);
     const navHardTimer = useRef<number | null>(null);
     const navFrame = useRef<number | null>(null);
+    const renderedPathsRef = useRef<Record<string, boolean>>(renderedPaths);
+    renderedPathsRef.current = renderedPaths;
 
     // Reset per-PR view state only when the PR itself changes (a background
     // refetch of the same PR must not yank the reader back to the first file).
@@ -205,6 +219,7 @@ export function PRView() {
         setActiveNavId(null);
         setReveal(null);
         setExpandRequest(null);
+        setRenderedPaths(readRenderedPaths(renderedKey));
         navCursor.current = -1;
         deepLinkDone.current = false;
         navLockRef.current = false;
@@ -488,6 +503,53 @@ export function PRView() {
             selectNavItem(item);
         },
         [selectNavItem],
+    );
+
+    /** Persist the rendered/diff choice for one Markdown file. */
+    const setRenderedForPath = useCallback(
+        (path: string, rendered: boolean) => {
+            setRenderedPaths((current) => {
+                const next = setPathRendered(current, path, rendered);
+                writeRenderedPaths(renderedKey, next);
+                return next;
+            });
+        },
+        [renderedKey],
+    );
+
+    /** Render or un-render every Markdown file in this PR. */
+    const setAllMarkdown = useCallback(
+        (rendered: boolean) => {
+            setRenderedPaths((current) => {
+                let next = current;
+                for (const file of filesRef.current) {
+                    if (!isMarkdownPath(file.path)) {
+                        continue;
+                    }
+                    next = setPathRendered(next, file.path, rendered);
+                }
+                writeRenderedPaths(renderedKey, next);
+                return next;
+            });
+        },
+        [renderedKey],
+    );
+
+    /** Keyboard/header toggle: flip the rendered state for one path. */
+    const toggleRenderedPath = useCallback(
+        (path: string) => {
+            setRenderedForPath(path, !(renderedPathsRef.current[path] ?? false));
+        },
+        [setRenderedForPath],
+    );
+
+    /** Comment markers in the rendered view switch back to the diff first. */
+    const jumpToMarkdownComment = useCallback(
+        (item: NavItem) => {
+            setRenderedForPath(item.path, false);
+            selectNavItem(item);
+        },
+        [selectNavItem, setRenderedForPath],
     );
 
     const goTop = useCallback(() => {
@@ -889,6 +951,16 @@ export function PRView() {
             'toggle-wrap': toggleWrap,
             'expand-context': () => requestExpand(false),
             'expand-context-all': () => requestExpand(true),
+            'toggle-rendered': () => {
+                const index = navTargetRef.current ?? currentIndexRef.current;
+                const entry = filesRef.current[index];
+                if (!entry || !isMarkdownPath(entry.path)) {
+                    return;
+                }
+                toggleRenderedPath(entry.path);
+            },
+            'render-all-markdown': () => setAllMarkdown(true),
+            'show-markdown-diffs': () => setAllMarkdown(false),
             'inbox': () => navigate(lastInboxUrl()),
             help: () => setHelpOpen(true),
             escape: () => {
@@ -913,9 +985,36 @@ export function PRView() {
             toggleView,
             toggleWrap,
             requestExpand,
+            setRenderedForPath,
+            toggleRenderedPath,
+            setAllMarkdown,
             navigate,
         ],
     );
+
+    const markdownFiles = useMemo(
+        () => files.filter((entry) => isMarkdownPath(entry.path)),
+        [files],
+    );
+    const currentFileMarkdown = isMarkdownPath(files[currentIndex]?.path ?? '');
+    const hasRenderedMarkdown = markdownFiles.some((entry) =>
+        Boolean(renderedPaths[entry.path]),
+    );
+
+    const markdownContext = useMemo<MarkdownContext | null>(() => {
+        if (!pr) {
+            return null;
+        }
+        return {
+            ws,
+            repo,
+            prUrl: pr.url,
+            sourceCommit: pr.source_commit,
+            mergeBase: pr.merge_base,
+            comments: navItems,
+            onJumpToComment: jumpToMarkdownComment,
+        };
+    }, [pr, ws, repo, navItems, jumpToMarkdownComment]);
 
     const dynamicCommands = useMemo<DynamicCommand[]>(
         () =>
@@ -934,6 +1033,9 @@ export function PRView() {
         handlers,
         hasFocus: focus !== null,
         hasFiles: files.length > 0,
+        hasMarkdown: markdownFiles.length > 0,
+        currentFileMarkdown,
+        hasRenderedMarkdown,
         dynamic: dynamicCommands,
     });
 
@@ -1152,6 +1254,10 @@ export function PRView() {
                                             ? {nonce: expandRequest.nonce, all: expandRequest.all}
                                             : null
                                     }
+                                    markdownPath={isMarkdownPath(entry.path) ? entry.path : null}
+                                    rendered={Boolean(renderedPaths[entry.path])}
+                                    onToggleRendered={toggleRenderedPath}
+                                    markdownContext={markdownContext}
                                 />
                             </FileDiffBoundary>
                         ))}
