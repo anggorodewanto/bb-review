@@ -23,6 +23,7 @@
     --shadow: 0 1px 2px rgba(31, 35, 40, 0.08), 0 4px 12px rgba(31, 35, 40, 0.06);
     --radius: 8px;
     --tap: 40px;
+    --pr-sticky-offset: 64px;
 
     --diff-background-color: var(--surface);
     --diff-text-color: var(--text);
@@ -1241,7 +1242,7 @@ kbd {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
-    scroll-margin-top: 64px;
+    scroll-margin-top: var(--pr-sticky-offset);
     overflow: hidden;
 }
 
@@ -1428,6 +1429,21 @@ kbd {
     background: var(--surface-2);
 }
 
+.expand-controls {
+    display: flex;
+    align-items: stretch;
+}
+
+.expand-controls.is-split .expand-btn {
+    flex: 1 1 50%;
+    min-width: 0;
+    border-right: 1px solid var(--border);
+}
+
+.expand-controls.is-split .expand-btn:last-child {
+    border-right: 0;
+}
+
 .expand-btn {
     width: 100%;
     min-height: 28px;
@@ -1438,6 +1454,9 @@ kbd {
     color: var(--accent);
     font: inherit;
     font-size: 12px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
     cursor: pointer;
 }
 
@@ -2430,14 +2449,14 @@ kbd {
     .pr-head {
         padding-top: 20px;
     }
-
-    .file-block {
-        scroll-margin-top: 72px;
-    }
 }
 
 @media (max-width: 699px) {
     .btn {
+        min-height: 40px;
+    }
+
+    .expand-btn {
         min-height: 40px;
     }
 

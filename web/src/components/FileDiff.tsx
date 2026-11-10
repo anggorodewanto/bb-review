@@ -5,7 +5,6 @@ import {
     Hunk,
     expandFromRawCode,
     getChangeKey,
-    getCollapsedLinesCountBetween,
     tokenize,
 } from 'react-diff-view';
 import type {ChangeData, HunkData, ViewType} from 'react-diff-view';
@@ -13,6 +12,13 @@ import {refractor} from 'refractor/lib/common.js';
 import type {Comment, Draft} from '../types';
 import type {FileEntry} from '../lib/diff';
 import {lineContainsChangeKey} from '../lib/diff';
+import {adjacentGap, gapLayout, gapSpecFor, hunkBounds} from '../lib/expand';
+import type {
+    AdjacentGap,
+    ExpandDirection,
+    FocusPosition,
+    GapControl,
+} from '../lib/expand';
 import type {ViewedStatus} from '../lib/viewed';
 import {buildLineIndex, groupComments, groupDrafts} from '../lib/comments';
 import {languageForPath, plural} from '../lib/format';
@@ -22,7 +28,6 @@ import {CommentEditor} from './CommentEditor';
 import type {CommentMode} from './CommentEditor';
 
 const LARGE_FILE_THRESHOLD = 1500;
-const EXPAND_LINES = 20;
 
 export type FileDiffProps = {
     entry: FileEntry;
@@ -42,10 +47,11 @@ export type FileDiffProps = {
     onToggleViewed: (entry: FileEntry) => void;
     onLineClick: (entry: FileEntry, index: number, change: ChangeData, side: 'old' | 'new') => void;
     onLoadSources: (entry: FileEntry) => Promise<{old: string; new: string} | null>;
-    onVisible: (index: number) => void;
     registerRef: (index: number, el: HTMLElement | null) => void;
     /** Bumped by a comment jump; forces this file to render and expand. */
     reveal: number | null;
+    /** Keyboard request (`e` / `E`) for the focused line in this file. */
+    expand: {nonce: number; all: boolean} | null;
 };
 
 function changeId(index: number, change: ChangeData): string {
@@ -60,44 +66,52 @@ function oldLineCount(source: string): number {
     return source.endsWith('\n') ? lines.length - 1 : lines.length;
 }
 
-function bottomRemaining(hunk: HunkData, count: number): number {
-    if (!hunk) {
-        return 0;
-    }
-    const end = hunk.oldLines > 0 ? hunk.oldStart + hunk.oldLines - 1 : hunk.oldStart;
-    return Math.max(0, count - end);
-}
-
-function expandRange(
-    hunk: HunkData,
-    direction: 'above' | 'below',
-    count: number,
-): [number, number] | null {
-    if (direction === 'above') {
-        const end = hunk.oldStart - 1;
-        const start = Math.max(1, end - EXPAND_LINES + 1);
-        return end >= start ? [start, end] : null;
-    }
-    const start = hunk.oldLines > 0 ? hunk.oldStart + hunk.oldLines : hunk.oldStart + 1;
-    const end = Math.min(start + EXPAND_LINES - 1, count);
-    return end >= start ? [start, end] : null;
-}
-
 type ExpandRowProps = {
     colSpan: number;
-    label: string;
+    controls: GapControl[];
     busy: boolean;
-    onClick: () => void;
+    onExpand: (direction: ExpandDirection) => void;
 };
 
-function ExpandRow({colSpan, label, busy, onClick}: ExpandRowProps) {
+function expandLabel(control: GapControl): string {
+    if (!control.range) {
+        return '↓ Expand below';
+    }
+    if (control.direction === 'all') {
+        return `↕ Expand all ${control.range.count} lines`;
+    }
+    const arrow = control.direction === 'up' ? '↑' : '↓';
+    return `${arrow} ${control.range.start}–${control.range.end}`;
+}
+
+function ExpandRow({colSpan, controls, busy, onExpand}: ExpandRowProps) {
     return (
         <tbody className="diff-expand">
             <tr>
                 <td colSpan={colSpan}>
-                    <button type="button" className="expand-btn" onClick={onClick} disabled={busy}>
-                        {label}
-                    </button>
+                    <div className={`expand-controls${controls.length > 1 ? ' is-split' : ''}`}>
+                        {controls.map((control, i) => (
+                            <button
+                                key={`${control.direction}-${i}`}
+                                type="button"
+                                className="expand-btn"
+                                data-command={
+                                    control.direction === 'all'
+                                        ? 'expand-context-all'
+                                        : 'expand-context'
+                                }
+                                onClick={() => onExpand(control.direction)}
+                                disabled={busy}
+                                title={
+                                    control.range
+                                        ? `Lines ${control.range.start}–${control.range.end}`
+                                        : 'Expand below'
+                                }
+                            >
+                                {expandLabel(control)}
+                            </button>
+                        ))}
+                    </div>
                 </td>
             </tr>
         </tbody>
@@ -121,9 +135,9 @@ function FileDiffInner({
     onToggleViewed,
     onLineClick,
     onLoadSources,
-    onVisible,
     registerRef,
     reveal,
+    expand,
 }: FileDiffProps) {
     const sectionRef = useRef<HTMLElement | null>(null);
     const [active, setActive] = useState(false);
@@ -173,24 +187,6 @@ function FileDiffInner({
         setActive(true);
         setLoadedLarge(true);
     }, [reveal]);
-
-    // Publish which file is currently in the reading band for tree highlighting.
-    useEffect(() => {
-        const el = sectionRef.current;
-        if (!el || typeof IntersectionObserver === 'undefined') {
-            return;
-        }
-        const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries.some((e) => e.isIntersecting)) {
-                    onVisible(index);
-                }
-            },
-            {rootMargin: '-45% 0px -45% 0px'},
-        );
-        observer.observe(el);
-        return () => observer.disconnect();
-    }, [index, onVisible]);
 
     const hunks = expandedHunks ?? entry.hunks;
     const lineIndex = useMemo(() => buildLineIndex(hunks), [hunks]);
@@ -275,9 +271,8 @@ function FileDiffInner({
         return result;
     }, [groups, draftGroups, draftReplies, actions, editorKey, onEditorSubmit, onEditorCancel]);
 
-    async function expand(hunkIndex: number, direction: 'above' | 'below') {
-        const hunk = hunks[hunkIndex];
-        if (!hunk || expanding) {
+    async function expandGap(gap: AdjacentGap, direction: ExpandDirection) {
+        if (expanding) {
             return;
         }
         setExpanding(true);
@@ -292,19 +287,94 @@ function FileDiffInner({
                 }
                 setSources(loaded);
             }
-            const count = oldLineCount(loaded.old);
-            const range = expandRange(hunk, direction, count);
+            const total = oldLineCount(loaded.old);
+            const spec = gapSpecFor(gap, hunkBounds(hunks), total);
+            if (!spec) {
+                return;
+            }
+            const layout = gapLayout(spec);
+            if (!layout) {
+                return;
+            }
+            const range =
+                direction === 'all'
+                    ? layout.gap
+                    : (layout.controls.find((control) => control.direction === direction)?.range ??
+                      layout.gap);
             if (!range) {
                 return;
             }
-            const lines = loaded.old.split('\n');
-            setExpandedHunks(expandFromRawCode(hunks, lines, range[0], range[1]));
+            // expandFromRawCode takes a half-open [start, end) range.
+            setExpandedHunks(
+                expandFromRawCode(hunks, loaded.old.split('\n'), range.start, range.end + 1),
+            );
         } catch (err) {
             setExpandError(err instanceof Error ? err.message : 'Could not expand the context');
         } finally {
             setExpanding(false);
         }
     }
+
+    function findFocusedChange(
+        list: HunkData[],
+        key: string | null,
+    ): {hunkIndex: number; position: FocusPosition} | null {
+        if (!key) {
+            return null;
+        }
+        for (let i = 0; i < list.length; i += 1) {
+            const changes = list[i]?.changes ?? [];
+            const at = changes.findIndex((change) =>
+                change ? getChangeKey(change) === key : false,
+            );
+            if (at < 0) {
+                continue;
+            }
+            if (changes.length === 1) {
+                return {hunkIndex: i, position: 'only'};
+            }
+            if (at === 0) {
+                return {hunkIndex: i, position: 'first'};
+            }
+            if (at === changes.length - 1) {
+                return {hunkIndex: i, position: 'last'};
+            }
+            return {hunkIndex: i, position: 'middle'};
+        }
+        return null;
+    }
+
+    function expandAtFocus(all: boolean) {
+        const found = findFocusedChange(hunks, focusedKey);
+        if (!found) {
+            return;
+        }
+        const bounds = hunkBounds(hunks);
+        const gap = adjacentGap(bounds, found.hunkIndex, found.position);
+        if (!gap) {
+            return;
+        }
+        if (all) {
+            void expandGap(gap, 'all');
+            return;
+        }
+        const total = sources ? oldLineCount(sources.old) : null;
+        const spec = gapSpecFor(gap, bounds, total);
+        const layout = spec ? gapLayout(spec) : null;
+        const control =
+            layout?.controls.find((item) => item.direction === gap.direction) ??
+            layout?.controls[0];
+        void expandGap(gap, control?.direction ?? 'all');
+    }
+
+    // `e` / `E` from the command registry (only the focused file gets a nonce).
+    useEffect(() => {
+        if (!expand) {
+            return;
+        }
+        expandAtFocus(expand.all);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [expand?.nonce]);
 
     const gutterClick = ({change, side}: {change: ChangeData | null; side?: 'old' | 'new'}) => {
         if (!change) {
@@ -331,55 +401,81 @@ function FileDiffInner({
 
     function renderHunks(rendered: HunkData[]): ReactElement[] {
         const rows: ReactElement[] = [];
-        const first = rendered[0];
         const colSpan = viewType === 'split' ? 4 : 3;
+        const bounds = hunkBounds(rendered);
 
-        if (first) {
-            const topGap = first.oldStart - 1;
-            if (topGap > 0) {
+        function pushGap(key: string, gap: AdjacentGap, controls: GapControl[]): void {
+            const primary = controls.filter((control) => control.direction !== 'all');
+            const all = controls.filter((control) => control.direction === 'all');
+            if (primary.length > 0) {
                 rows.push(
                     <ExpandRow
-                        key="expand-top"
+                        key={key}
                         colSpan={colSpan}
+                        controls={primary}
                         busy={expanding}
-                        label={`Expand ${Math.min(EXPAND_LINES, topGap)} lines above`}
-                        onClick={() => void expand(0, 'above')}
+                        onExpand={(direction) => void expandGap(gap, direction)}
                     />,
                 );
+            }
+            for (const control of all) {
+                rows.push(
+                    <ExpandRow
+                        key={`${key}-all`}
+                        colSpan={colSpan}
+                        controls={[control]}
+                        busy={expanding}
+                        onExpand={() => void expandGap(gap, 'all')}
+                    />,
+                );
+            }
+        }
+
+        const firstBounds = bounds[0];
+        if (firstBounds && firstBounds.start > 1) {
+            const layout = gapLayout({kind: 'top', firstStart: firstBounds.start});
+            if (layout) {
+                pushGap('expand-top', {kind: 'top', anchor: 0, direction: 'up'}, layout.controls);
             }
         }
 
         rendered.forEach((hunk, i) => {
             rows.push(<Hunk key={`hunk-${hunk.oldStart}-${hunk.newStart}-${i}`} hunk={hunk} />);
 
-            const next = rendered[i + 1];
-            if (next) {
-                const gap = getCollapsedLinesCountBetween(hunk, next);
-                if (gap > 0) {
-                    rows.push(
-                        <ExpandRow
-                            key={`expand-${i}`}
-                            colSpan={colSpan}
-                            busy={expanding}
-                            label={`Expand ${Math.min(EXPAND_LINES, gap)} lines`}
-                            onClick={() => void expand(i, 'below')}
-                        />,
-                    );
+            const previous = bounds[i];
+            const nextBounds = bounds[i + 1];
+            if (nextBounds) {
+                const previousEnd = previous?.end ?? 0;
+                if (nextBounds.start > previousEnd + 1) {
+                    const layout = gapLayout({
+                        kind: 'middle',
+                        prevEnd: previousEnd,
+                        nextStart: nextBounds.start,
+                    });
+                    if (layout) {
+                        pushGap(
+                            `expand-${i}`,
+                            {kind: 'middle', anchor: i, direction: 'down'},
+                            layout.controls,
+                        );
+                    }
                 }
                 return;
             }
 
-            const count = sources ? oldLineCount(sources.old) : null;
-            const remaining = count == null ? null : bottomRemaining(hunk, count);
-            if (remaining === null || remaining > 0) {
-                rows.push(
-                    <ExpandRow
-                        key="expand-bottom"
-                        colSpan={colSpan}
-                        busy={expanding}
-                        label={remaining == null ? 'Expand below' : `Expand ${Math.min(EXPAND_LINES, remaining)} lines below`}
-                        onClick={() => void expand(i, 'below')}
-                    />,
+            if (!previous) {
+                return;
+            }
+            const layout = gapLayout({
+                kind: 'bottom',
+                lastEnd: previous.end,
+                total: sources ? oldLineCount(sources.old) : null,
+            });
+            if (layout) {
+                pushGap(
+                    'expand-bottom',
+                    {kind: 'bottom', anchor: bounds.length - 1, direction: 'down'},
+                    layout.controls,
                 );
             }
         });

@@ -27,6 +27,8 @@ export type CommandId =
     | 'toggle-split'
     | 'toggle-wrap'
     | 'toggle-comments'
+    | 'expand-context'
+    | 'expand-context-all'
     | 'help'
     | 'help-page'
     | 'escape';
@@ -238,6 +240,22 @@ export const COMMANDS: Command[] = [
         keys: [['w']],
         when: onPr,
         run: dispatch('toggle-wrap'),
+    },
+    {
+        id: 'expand-context',
+        title: 'Expand context gap',
+        group: 'View',
+        keys: [['e']],
+        when: onPrWithFocus,
+        run: dispatch('expand-context'),
+    },
+    {
+        id: 'expand-context-all',
+        title: 'Expand whole context gap',
+        group: 'View',
+        keys: [['E']],
+        when: onPrWithFocus,
+        run: dispatch('expand-context-all'),
     },
     {
         id: 'help',

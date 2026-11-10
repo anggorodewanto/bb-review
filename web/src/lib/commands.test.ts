@@ -39,6 +39,8 @@ describe('command registry', () => {
             COMMAND_BY_ID.get(id)?.keys.map((sequence) => sequence.join(' '));
         expect(keysFor('next-file')).toEqual(['j']);
         expect(keysFor('toggle-wrap')).toEqual(['w']);
+        expect(keysFor('expand-context')).toEqual(['e']);
+        expect(keysFor('expand-context-all')).toEqual(['E']);
         expect(keysFor('next-comment')).toEqual([']']);
         expect(keysFor('toggle-comments')).toEqual(['C']);
         expect(keysFor('scroll-top')).toEqual(['g g', 'Home']);

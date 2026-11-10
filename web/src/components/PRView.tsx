@@ -11,6 +11,7 @@ import {anchorForChange, commentCounts, groupComments} from '../lib/comments';
 import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHash} from '../lib/commentNav';
 import type {NavItem} from '../lib/commentNav';
 import {prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
+import {fileIndexAtLine, nextNavTarget} from '../lib/fileNav';
 import type {DynamicCommand} from '../lib/commands';
 import {setCommandDetail} from '../lib/commandFeedback';
 import {lastInboxUrl} from '../lib/inboxUrl';
@@ -155,6 +156,11 @@ export function PRView() {
     const [commentsOpen, setCommentsOpen] = useState(false);
     const [activeNavId, setActiveNavId] = useState<string | null>(null);
     const [reveal, setReveal] = useState<{fileIndex: number; nonce: number} | null>(null);
+    const [expandRequest, setExpandRequest] = useState<{
+        fileIndex: number;
+        nonce: number;
+        all: boolean;
+    } | null>(null);
 
     const viewType: ViewType = forceUnified ? 'unified' : viewPref;
 
@@ -177,6 +183,13 @@ export function PRView() {
     const revealNonce = useRef(0);
     const navCursor = useRef(-1);
     const deepLinkDone = useRef(false);
+    const expandNonce = useRef(0);
+    const navTargetRef = useRef<number | null>(null);
+    const navLockRef = useRef(false);
+    const navCorrectRef = useRef(false);
+    const navSettleTimer = useRef<number | null>(null);
+    const navHardTimer = useRef<number | null>(null);
+    const navFrame = useRef<number | null>(null);
 
     // Reset per-PR view state only when the PR itself changes (a background
     // refetch of the same PR must not yank the reader back to the first file).
@@ -187,8 +200,12 @@ export function PRView() {
         setCommentsOpen(false);
         setActiveNavId(null);
         setReveal(null);
+        setExpandRequest(null);
         navCursor.current = -1;
         deepLinkDone.current = false;
+        navLockRef.current = false;
+        navTargetRef.current = null;
+        clearNavTimers();
         hunkCursor.current = {fileIndex: -1, hunk: -1};
         window.scrollTo(0, 0);
     }, [prId]);
@@ -204,14 +221,150 @@ export function PRView() {
         fileRefs.current[index] = el;
     }, []);
 
-    const scrollToFile = useCallback((index: number) => {
-        setCurrentIndex(index);
-        const el = fileRefs.current[index];
-        if (!el) {
+    // --- scroll-spy + navigation lock --------------------------------------
+    // The reading line sits just below the sticky toolbar; it must match the
+    // CSS `scroll-margin-top` used when a file is scrolled into view.
+    const readingLine = useCallback((): number => {
+        const toolbar = document.querySelector<HTMLElement>('.pr-toolbar');
+        if (!toolbar) {
+            return 8;
+        }
+        const position = window.getComputedStyle(toolbar).position;
+        if (position !== 'sticky' && position !== 'fixed') {
+            return 8;
+        }
+        const offset = Math.max(8, Math.round(toolbar.getBoundingClientRect().height) + 8);
+        document.documentElement.style.setProperty('--pr-sticky-offset', `${offset}px`);
+        return offset;
+    }, []);
+
+    const clearNavTimers = useCallback(() => {
+        if (navSettleTimer.current !== null) {
+            window.clearTimeout(navSettleTimer.current);
+            navSettleTimer.current = null;
+        }
+        if (navHardTimer.current !== null) {
+            window.clearTimeout(navHardTimer.current);
+            navHardTimer.current = null;
+        }
+    }, []);
+
+    const settleNavigation = useCallback(() => {
+        if (!navLockRef.current) {
             return;
         }
-        el.scrollIntoView({behavior: 'smooth', block: 'start'});
-    }, []);
+        navLockRef.current = false;
+        clearNavTimers();
+        const target = navTargetRef.current;
+        navTargetRef.current = null;
+        if (target === null) {
+            return;
+        }
+        setCurrentIndex(target);
+        if (!navCorrectRef.current) {
+            return;
+        }
+        navCorrectRef.current = false;
+        const line = readingLine();
+        window.requestAnimationFrame(() => {
+            const section = fileRefs.current[target];
+            if (!section) {
+                return;
+            }
+            const top = section.getBoundingClientRect().top;
+            if (Math.abs(top - line) <= 4) {
+                return;
+            }
+            window.scrollTo({top: window.scrollY + top - line, behavior: 'auto'});
+        });
+    }, [clearNavTimers, readingLine]);
+
+    const beginNavigation = useCallback(
+        (target: number, correct: boolean) => {
+            navTargetRef.current = target;
+            navCorrectRef.current = correct;
+            navLockRef.current = true;
+            clearNavTimers();
+            navHardTimer.current = window.setTimeout(() => settleNavigation(), 1500);
+        },
+        [clearNavTimers, settleNavigation],
+    );
+
+    const scrollToFile = useCallback(
+        (index: number) => {
+            const list = filesRef.current;
+            if (list.length === 0) {
+                return;
+            }
+            const target = Math.min(list.length - 1, Math.max(0, index));
+            // Keep the CSS scroll-margin in sync with the measured header.
+            readingLine();
+            beginNavigation(target, true);
+            setCurrentIndex(target);
+            const el = fileRefs.current[target];
+            if (!el) {
+                settleNavigation();
+                return;
+            }
+            const behavior: ScrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
+            if (typeof el.scrollIntoView === 'function') {
+                el.scrollIntoView({behavior, block: 'start'});
+            }
+        },
+        [beginNavigation, readingLine, settleNavigation],
+    );
+
+    const onScrollSpy = useCallback(() => {
+        if (navLockRef.current) {
+            if (navSettleTimer.current !== null) {
+                window.clearTimeout(navSettleTimer.current);
+            }
+            navSettleTimer.current = window.setTimeout(() => settleNavigation(), 120);
+            return;
+        }
+        if (navFrame.current !== null) {
+            return;
+        }
+        navFrame.current = window.requestAnimationFrame(() => {
+            navFrame.current = null;
+            const tops = filesRef.current.map((_entry, index) => {
+                const el = fileRefs.current[index];
+                return el ? el.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
+            });
+            const index = fileIndexAtLine(tops, readingLine());
+            if (index >= 0) {
+                setCurrentIndex(index);
+            }
+        });
+    }, [readingLine, settleNavigation]);
+
+    useEffect(() => {
+        const onScroll = () => onScrollSpy();
+        const onScrollEnd = () => settleNavigation();
+        window.addEventListener('scroll', onScroll, {passive: true});
+        window.addEventListener('resize', onScroll);
+        window.addEventListener('scrollend', onScrollEnd);
+        onScrollSpy();
+        return () => {
+            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('resize', onScroll);
+            window.removeEventListener('scrollend', onScrollEnd);
+            if (navFrame.current !== null) {
+                window.cancelAnimationFrame(navFrame.current);
+                navFrame.current = null;
+            }
+        };
+    }, [onScrollSpy, settleNavigation, files.length]);
+
+    useEffect(() => {
+        return () => {
+            clearNavTimers();
+            if (navFrame.current !== null) {
+                window.cancelAnimationFrame(navFrame.current);
+                navFrame.current = null;
+            }
+        };
+    }, [clearNavTimers]);
 
     // Wait for the thread to exist (lazy/expanded files render a frame later),
     // open any closed outdated section, then center and flash it.
@@ -260,6 +413,7 @@ export function PRView() {
                 scrollToNavItem(item);
                 return;
             }
+            beginNavigation(item.fileIndex, false);
             setCurrentIndex(item.fileIndex);
             setReveal({fileIndex: item.fileIndex, nonce: (revealNonce.current += 1)});
             if (item.changeKey && item.anchor) {
@@ -267,7 +421,7 @@ export function PRView() {
             }
             scrollToNavItem(item);
         },
-        [scrollToNavItem],
+        [beginNavigation, scrollToNavItem],
     );
 
     const goComment = useCallback(
@@ -314,12 +468,13 @@ export function PRView() {
     );
 
     const goTop = useCallback(() => {
+        beginNavigation(0, false);
         scrollPageToTop(pageRef.current);
         setCurrentIndex(0);
         const first = filesRef.current[0];
         const change = first ? flattenChanges(first.hunks, first.path)[0] : undefined;
         setFocus(change ? {fileIndex: 0, key: change.key, anchor: change.anchor} : null);
-    }, []);
+    }, [beginNavigation]);
 
     // --- mutations ----------------------------------------------------------
     const invalidatePr = useCallback(() => {
@@ -552,7 +707,7 @@ export function PRView() {
             if (list.length === 0) {
                 return;
             }
-            let index = currentIndexRef.current;
+            let index = navTargetRef.current ?? currentIndexRef.current;
             for (let guard = 0; guard <= list.length; guard += 1) {
                 const section = fileRefs.current[index];
                 const hunks = section ? Array.from(section.querySelectorAll<HTMLElement>('.diff-hunk')) : [];
@@ -563,7 +718,11 @@ export function PRView() {
                     if (next >= 0 && next < hunks.length) {
                         hunkCursor.current = {fileIndex: index, hunk: next};
                         setCurrentIndex(index);
-                        hunks[next]?.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        beginNavigation(index, false);
+                        hunks[next]?.scrollIntoView({
+                            behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+                            block: 'center',
+                        });
                         return;
                     }
                 }
@@ -576,37 +735,45 @@ export function PRView() {
                     const target = delta === 1 ? 0 : nextHunks.length - 1;
                     hunkCursor.current = {fileIndex: index, hunk: target};
                     setCurrentIndex(index);
-                    nextHunks[target]?.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    beginNavigation(index, false);
+                    nextHunks[target]?.scrollIntoView({
+                        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+                        block: 'center',
+                    });
                     return;
                 }
             }
         },
-        [],
+        [beginNavigation],
     );
 
-    const goLine = useCallback((delta: 1 | -1) => {
-        const list = filesRef.current;
-        const index = currentIndexRef.current;
-        const entry = list[index];
-        if (!entry) {
-            return;
-        }
-        const changes = flattenChanges(entry.hunks, entry.path);
-        if (changes.length === 0) {
-            return;
-        }
-        const current = focusRef.current?.fileIndex === index ? focusRef.current.key : null;
-        const at = current ? changes.findIndex((item) => item.key === current) : -1;
-        const nextIndex =
-            at === -1 ? (delta === 1 ? 0 : changes.length - 1) : Math.min(changes.length - 1, Math.max(0, at + delta));
-        const target = changes[nextIndex];
-        if (!target) {
-            return;
-        }
-        setFocus({fileIndex: index, key: target.key, anchor: target.anchor});
-        const el = document.getElementById(`change-${index}-${target.key}`);
-        el?.scrollIntoView({behavior: 'smooth', block: 'center'});
-    }, []);
+    const goLine = useCallback(
+        (delta: 1 | -1) => {
+            const list = filesRef.current;
+            const index = navTargetRef.current ?? currentIndexRef.current;
+            const entry = list[index];
+            if (!entry) {
+                return;
+            }
+            const changes = flattenChanges(entry.hunks, entry.path);
+            if (changes.length === 0) {
+                return;
+            }
+            const current = focusRef.current?.fileIndex === index ? focusRef.current.key : null;
+            const at = current ? changes.findIndex((item) => item.key === current) : -1;
+            const nextIndex =
+                at === -1 ? (delta === 1 ? 0 : changes.length - 1) : Math.min(changes.length - 1, Math.max(0, at + delta));
+            const target = changes[nextIndex];
+            if (!target) {
+                return;
+            }
+            setFocus({fileIndex: index, key: target.key, anchor: target.anchor});
+            beginNavigation(index, false);
+            const el = document.getElementById(`change-${index}-${target.key}`);
+            el?.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center'});
+        },
+        [beginNavigation],
+    );
 
     const commentOnFocus = useCallback(() => {
         const current = focusRef.current;
@@ -618,7 +785,7 @@ export function PRView() {
 
     const toggleViewedAndAdvance = useCallback(() => {
         const list = filesRef.current;
-        const index = currentIndexRef.current;
+        const index = navTargetRef.current ?? currentIndexRef.current;
         const entry = list[index];
         if (!entry) {
             return;
@@ -639,10 +806,39 @@ export function PRView() {
         }
     }, [queryClient, viewedKey, putViewedMutation.mutate, scrollToFile]);
 
+    const requestExpand = useCallback((all: boolean) => {
+        const current = focusRef.current;
+        if (!current) {
+            return;
+        }
+        setExpandRequest({
+            fileIndex: current.fileIndex,
+            nonce: (expandNonce.current += 1),
+            all,
+        });
+    }, []);
+
     const handlers = useMemo<Record<string, () => void>>(
         () => ({
-            'next-file': () => scrollToFile(Math.min(filesRef.current.length - 1, currentIndexRef.current + 1)),
-            'prev-file': () => scrollToFile(Math.max(0, currentIndexRef.current - 1)),
+            // Chain fast j/k presses from the in-flight target, not the spy.
+            'next-file': () =>
+                scrollToFile(
+                    nextNavTarget(
+                        currentIndexRef.current,
+                        1,
+                        navTargetRef.current,
+                        filesRef.current.length,
+                    ),
+                ),
+            'prev-file': () =>
+                scrollToFile(
+                    nextNavTarget(
+                        currentIndexRef.current,
+                        -1,
+                        navTargetRef.current,
+                        filesRef.current.length,
+                    ),
+                ),
             'next-hunk': () => goHunk(1),
             'prev-hunk': () => goHunk(-1),
             'next-line': () => goLine(1),
@@ -658,6 +854,8 @@ export function PRView() {
             'toggle-tree': toggleTree,
             'toggle-split': toggleView,
             'toggle-wrap': toggleWrap,
+            'expand-context': () => requestExpand(false),
+            'expand-context-all': () => requestExpand(true),
             'inbox': () => navigate(lastInboxUrl()),
             help: () => setHelpOpen(true),
             escape: () => {
@@ -680,6 +878,7 @@ export function PRView() {
             toggleTree,
             toggleView,
             toggleWrap,
+            requestExpand,
             navigate,
         ],
     );
@@ -912,9 +1111,13 @@ export function PRView() {
                                     onToggleViewed={toggleFileViewed}
                                     onLineClick={onLineClick}
                                     onLoadSources={loadSources}
-                                    onVisible={setCurrentIndex}
                                     registerRef={registerRef}
                                     reveal={reveal?.fileIndex === index ? reveal.nonce : null}
+                                    expand={
+                                        expandRequest?.fileIndex === index
+                                            ? {nonce: expandRequest.nonce, all: expandRequest.all}
+                                            : null
+                                    }
                                 />
                             </FileDiffBoundary>
                         ))}
