@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -192,5 +193,50 @@ func TestCorruptStateFileIsAnError(t *testing.T) {
 	}
 	if _, err := Open(path); err == nil {
 		t.Fatal("expected an error for a corrupt state file")
+	}
+}
+
+func TestScannerStateRoundTrip(t *testing.T) {
+	s, path := newStore(t)
+	if got := s.ScannerState(); got != nil {
+		t.Fatalf("scanner state = %s, want nil", got)
+	}
+
+	type scannerState struct {
+		Repos map[string]int `json:"repos"`
+	}
+	if err := s.SetScannerState(scannerState{Repos: map[string]int{"ws/repo-a": 3}}); err != nil {
+		t.Fatalf("SetScannerState: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	raw := reopened.ScannerState()
+	if raw == nil {
+		t.Fatal("scanner state did not survive the reopen")
+	}
+	var decoded scannerState
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode scanner state: %v", err)
+	}
+	if decoded.Repos["ws/repo-a"] != 3 {
+		t.Fatalf("scanner state = %+v", decoded)
+	}
+
+	// Drafts and viewed state keep working alongside the scanner blob.
+	if _, err := reopened.AddDraft("ws/repo-a/1", "hi", nil, nil); err != nil {
+		t.Fatalf("AddDraft: %v", err)
+	}
+	after, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen again: %v", err)
+	}
+	if after.ScannerState() == nil {
+		t.Fatal("scanner state lost after a draft write")
+	}
+	if len(after.Drafts("ws/repo-a/1")) != 1 {
+		t.Fatal("draft lost after scanner state write")
 	}
 }

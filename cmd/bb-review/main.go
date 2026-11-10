@@ -16,6 +16,7 @@ import (
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 	"github.com/anggorodewanto/bb-review/internal/config"
+	"github.com/anggorodewanto/bb-review/internal/scanner"
 	"github.com/anggorodewanto/bb-review/internal/server"
 	"github.com/anggorodewanto/bb-review/internal/store"
 	"github.com/anggorodewanto/bb-review/web"
@@ -61,19 +62,30 @@ func run(logger *slog.Logger) error {
 	}
 
 	client := bitbucket.New(bitbucket.Options{
-		BaseURL:      cfg.BaseURL,
-		Email:        cfg.Email,
-		Token:        cfg.Token,
-		Logger:       logger,
-		DiscoveryTTL: cfg.DiscoveryTTLOrDefault(),
+		BaseURL: cfg.BaseURL,
+		Email:   cfg.Email,
+		Token:   cfg.Token,
+		Logger:  logger,
+	})
+
+	scanner := scanner.New(scanner.Options{
+		Client:            client,
+		Store:             localStore,
+		Logger:            logger,
+		Workspace:         cfg.Workspace,
+		ConfigRepos:       cfg.RepoRefs(),
+		ActiveDays:        cfg.ActiveDaysOrDefault(),
+		ScanInterval:      cfg.ScanIntervalOrDefault(),
+		FullSweepInterval: cfg.FullSweepIntervalOrDefault(),
 	})
 
 	handler := server.New(server.Options{
-		Config: cfg,
-		Client: client,
-		Store:  localStore,
-		Logger: logger,
-		Assets: assets,
+		Config:  cfg,
+		Client:  client,
+		Store:   localStore,
+		Logger:  logger,
+		Assets:  assets,
+		Scanner: scanner,
 	}).Handler()
 
 	httpSrv := &http.Server{
@@ -86,12 +98,16 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go scanner.Run(ctx)
+
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("listening",
 			"addr", cfg.Listen,
 			"workspace", cfg.Workspace,
 			"repos", len(cfg.Repos),
+			"scan_interval", cfg.ScanIntervalOrDefault().String(),
+			"full_sweep_interval", cfg.FullSweepIntervalOrDefault().String(),
 			"state", localStore.Path(),
 			"frontend_built", indexAvailable,
 		)

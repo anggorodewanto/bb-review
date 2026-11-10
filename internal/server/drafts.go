@@ -137,6 +137,9 @@ func (s *Server) handleSubmitDrafts(w http.ResponseWriter, r *http.Request) {
 	if action != "" && !s.applySubmitAction(w, r, repo, id, action) {
 		return
 	}
+	if len(response.Posted) > 0 || action != "" {
+		s.refreshRepoAfterWrite(ctx, repo)
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -20,6 +22,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePRList returns open pull requests for the reviewer or author role.
+//
+// reviewer: served straight from scanner state (never blocks on Bitbucket).
+// author: fetched live from the workspace endpoint.
 func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 	role := strings.TrimSpace(r.URL.Query().Get("role"))
 	if role == "" {
@@ -35,13 +40,16 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 		state = "OPEN"
 	}
 
-	result, err := s.bb.ListPRs(r.Context(), bitbucket.ListOptions{
-		Role:       role,
-		State:      state,
-		Workspace:  s.cfg.Workspace,
-		Repos:      s.cfg.RepoRefs(),
-		ActiveDays: s.cfg.ActiveDaysOrDefault(),
-	})
+	if role == "author" {
+		s.writeAuthorPRList(w, r, state)
+		return
+	}
+	s.writeReviewerPRList(w, r)
+}
+
+// writeAuthorPRList fetches the author list live.
+func (s *Server) writeAuthorPRList(w http.ResponseWriter, r *http.Request, state string) {
+	prs, err := s.bb.AuthorPRs(r.Context(), s.cfg.Workspace, state)
 	if err != nil {
 		if bitbucket.IsRateLimited(err) {
 			w.Header().Set("X-BBR-Rate-Limited", "1")
@@ -49,21 +57,62 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 		s.writeUpstream(w, "pr list", err)
 		return
 	}
+	w.Header().Set("X-BBR-Fetched-At", time.Now().UTC().Format(time.RFC3339))
+	if prs == nil {
+		prs = []bitbucket.PRSummary{}
+	}
+	writeJSON(w, http.StatusOK, prs)
+}
+
+// writeReviewerPRList answers from scanner state with freshness/progress headers.
+func (s *Server) writeReviewerPRList(w http.ResponseWriter, r *http.Request) {
+	if s.scanner == nil {
+		writeError(w, http.StatusInternalServerError, "scanner is not configured")
+		return
+	}
+	snapshot := s.scanner.Snapshot()
 
 	header := w.Header()
-	if len(result.Failed) > 0 {
-		header.Set("X-BBR-Partial", strings.Join(result.Failed, ","))
+	if !snapshot.FetchedAt.IsZero() {
+		header.Set("X-BBR-Fetched-At", snapshot.FetchedAt.UTC().Format(time.RFC3339))
 	}
-	if !result.FetchedAt.IsZero() {
-		header.Set("X-BBR-Fetched-At", result.FetchedAt.UTC().Format(time.RFC3339))
+	if snapshot.Scanning {
+		header.Set("X-BBR-Scanning", fmt.Sprintf("%d/%d", snapshot.Done, snapshot.Total))
 	}
-	if result.RateLimited {
+	if len(snapshot.Failed) > 0 {
+		header.Set("X-BBR-Partial", strings.Join(snapshot.Failed, ","))
+	}
+	if snapshot.RateLimited {
 		header.Set("X-BBR-Rate-Limited", "1")
 	}
-	if result.PRs == nil {
-		result.PRs = []bitbucket.PRSummary{}
+	if snapshot.PRs == nil {
+		snapshot.PRs = []bitbucket.PRSummary{}
 	}
-	writeJSON(w, http.StatusOK, result.PRs)
+	writeJSON(w, http.StatusOK, snapshot.PRs)
+}
+
+// handleScan triggers an immediate scan tick. Debounced by the scanner itself.
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	if s.scanner == nil {
+		writeError(w, http.StatusInternalServerError, "scanner is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, scanResponse{Started: s.scanner.Trigger(r.Context())})
+}
+
+type scanResponse struct {
+	Started bool `json:"started"`
+}
+
+// refreshRepoAfterWrite re-scans one repo so the reviewer list reflects a comment,
+// approval or change request.
+func (s *Server) refreshRepoAfterWrite(ctx context.Context, repo bitbucket.Repo) {
+	if s.scanner == nil {
+		return
+	}
+	if err := s.scanner.RefreshRepo(ctx, repo); err != nil {
+		s.log.Warn("refresh repo after write failed", "repo", repo.String(), "err", err.Error())
+	}
 }
 
 // handlePRDetail returns the full pull request view.

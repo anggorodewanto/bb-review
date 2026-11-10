@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	neturl "net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -15,18 +14,6 @@ import (
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
-}
-
-// registerDiscovery makes the fake workspace repository listing empty.
-func registerDiscovery(mux *http.ServeMux) {
-	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"values":[]}`))
-	})
-}
-
-// listOptions builds reviewer ListOptions for the tests.
-func listOptions(repos []Repo, role string) ListOptions {
-	return ListOptions{Role: role, State: "OPEN", Workspace: "ws", Repos: repos, ActiveDays: 14}
 }
 
 func testClient(t *testing.T, handler http.Handler) *Client {
@@ -111,295 +98,6 @@ func TestMeIsCachedForProcessLifetime(t *testing.T) {
 	}
 }
 
-func TestListPRsQueryPaginationAndMapping(t *testing.T) {
-	var queries []string
-	var srvURL string
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(meJSON))
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		queries = append(queries, r.URL.RawQuery)
-		if r.URL.Query().Get("page") == "2" {
-			writeJSON(t, w, 200, map[string]any{
-				"values": []any{prJSON(3, "third", "2026-01-05T09:00:00+00:00")},
-				"next":   "",
-			})
-			return
-		}
-		writeJSON(t, w, 200, map[string]any{
-			"values": []any{
-				prJSON(1, "first", "2026-01-03T09:00:00+00:00"),
-				prJSON(2, "second", "2026-01-04T09:00:00+00:00"),
-			},
-			"next": srvURL + "/2.0/repositories/ws/repo-a/pullrequests?page=2",
-		})
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/commit/{hash}/statuses", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 200, map[string]any{
-			"values": []any{
-				map[string]any{"key": "ci", "name": "CI", "state": "SUCCESSFUL", "url": "https://ci/1"},
-				map[string]any{"key": "lint", "name": "Lint", "state": "FAILED", "url": "https://ci/2"},
-			},
-			"next": "",
-		})
-	})
-
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	srvURL = srv.URL
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	repos := []Repo{{Workspace: "ws", Repo: "repo-a"}}
-	result, err := client.ListPRs(context.Background(), listOptions(repos, "reviewer"))
-	if err != nil {
-		t.Fatalf("ListPRs: %v", err)
-	}
-	if len(result.Failed) != 0 {
-		t.Fatalf("unexpected failed repos: %v", result.Failed)
-	}
-	if len(result.PRs) != 3 {
-		t.Fatalf("got %d PRs, want 3", len(result.PRs))
-	}
-	if len(queries) == 0 {
-		t.Fatal("no pull request queries recorded")
-	}
-
-	// The q filter must be url-encoded, never a raw quote.
-	rawQuery := queries[0]
-	if strings.Contains(rawQuery, `"`) {
-		t.Fatalf("raw query contains unescaped quote: %s", rawQuery)
-	}
-	if !strings.Contains(rawQuery, "%22") {
-		t.Fatalf("raw query does not escape quotes: %s", rawQuery)
-	}
-	parsed := mustParseQuery(t, rawQuery)
-	if got, want := parsed.Get("q"), `reviewers.uuid="uuid-me"`; got != want {
-		t.Fatalf("q = %q, want %q", got, want)
-	}
-	if got := parsed.Get("state"); got != "OPEN" {
-		t.Fatalf("state = %q", got)
-	}
-	if got := parsed.Get("pagelen"); got != "50" {
-		t.Fatalf("pagelen = %q", got)
-	}
-	if got := parsed.Get("fields"); got != "+values.participants" {
-		t.Fatalf("fields = %q", got)
-	}
-
-	// Sorted by updated_on desc.
-	gotOrder := []int{result.PRs[0].ID, result.PRs[1].ID, result.PRs[2].ID}
-	wantOrder := []int{3, 2, 1}
-	for i := range wantOrder {
-		if gotOrder[i] != wantOrder[i] {
-			t.Fatalf("order = %v, want %v", gotOrder, wantOrder)
-		}
-	}
-
-	first := result.PRs[2]
-	if first.Workspace != "ws" || first.Repo != "repo-a" {
-		t.Fatalf("workspace/repo = %q/%q", first.Workspace, first.Repo)
-	}
-	if first.MyState != ReviewApproved {
-		t.Fatalf("my_state = %q, want approved", first.MyState)
-	}
-	if first.Approvals != 1 {
-		t.Fatalf("approvals = %d, want 1", first.Approvals)
-	}
-	if first.BuildState != BuildFailed {
-		t.Fatalf("build_state = %q, want FAILED", first.BuildState)
-	}
-	if first.SourceBranch != "feat" || first.DestBranch != "main" {
-		t.Fatalf("branches = %q -> %q", first.SourceBranch, first.DestBranch)
-	}
-	if first.CommentCount != 3 || first.TaskCount != 1 {
-		t.Fatalf("counts = %d/%d", first.CommentCount, first.TaskCount)
-	}
-}
-
-func mustParseQuery(t *testing.T, raw string) neturl.Values {
-	t.Helper()
-	values, err := neturl.ParseQuery(raw)
-	if err != nil {
-		t.Fatalf("parse query %q: %v", raw, err)
-	}
-	return values
-}
-
-func TestListPRsAuthorUsesWorkspaceEndpoint(t *testing.T) {
-	var escapedPath, query, selectedUser string
-	var repoCalls int
-
-	mux := http.NewServeMux()
-	// Real Bitbucket uuids look like {1234-abcd}, so the path segment must be escaped.
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"uuid":"{1234-abcd}","display_name":"Me"}`))
-	})
-	mux.HandleFunc("GET /2.0/workspaces/ws/pullrequests/{user}", func(w http.ResponseWriter, r *http.Request) {
-		escapedPath = r.URL.EscapedPath()
-		selectedUser = r.PathValue("user")
-		query = r.URL.RawQuery
-		writeJSON(t, w, 200, map[string]any{
-			"values": []any{
-				map[string]any{
-					"id": 11, "title": "authored", "state": "OPEN",
-					"updated_on":  "2026-01-02T09:00:00+00:00",
-					"destination": map[string]any{"repository": map[string]any{"full_name": "ws/from-full-name"}},
-					"source":      map[string]any{"branch": map[string]any{"name": "feat"}},
-				},
-				map[string]any{
-					"id": 12, "title": "fallback", "state": "OPEN",
-					"updated_on": "2026-01-03T09:00:00+00:00",
-					"links":      map[string]any{"html": map[string]any{"href": "https://bitbucket.org/ws/from-html/pull-requests/12"}},
-				},
-			},
-			"next": "",
-		})
-	})
-	mux.HandleFunc("GET /2.0/repositories/", func(w http.ResponseWriter, r *http.Request) {
-		repoCalls++
-		writeJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "should not be called"}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	result, err := client.ListPRs(context.Background(), listOptions([]Repo{{Workspace: "ws", Repo: "repo-a"}}, "author"))
-	if err != nil {
-		t.Fatalf("ListPRs: %v", err)
-	}
-	if repoCalls != 0 {
-		t.Fatalf("author role must not fan out per repo (calls = %d)", repoCalls)
-	}
-	if want := "/2.0/workspaces/ws/pullrequests/%7B1234-abcd%7D"; escapedPath != want {
-		t.Fatalf("path = %q, want %q", escapedPath, want)
-	}
-	if selectedUser != "{1234-abcd}" {
-		t.Fatalf("selected user = %q, want the decoded uuid", selectedUser)
-	}
-
-	parsed := mustParseQuery(t, query)
-	if got := parsed.Get("state"); got != "OPEN" {
-		t.Fatalf("state = %q", got)
-	}
-	if got := parsed.Get("pagelen"); got != "50" {
-		t.Fatalf("pagelen = %q", got)
-	}
-	if got := parsed.Get("fields"); got != "+values.participants" {
-		t.Fatalf("fields = %q", got)
-	}
-	if got := parsed.Get("q"); got != "" {
-		t.Fatalf("author listing must not send a q filter, got %q", got)
-	}
-
-	if len(result.PRs) != 2 {
-		t.Fatalf("prs = %d, want 2", len(result.PRs))
-	}
-	byID := make(map[int]PRSummary, len(result.PRs))
-	for _, pr := range result.PRs {
-		byID[pr.ID] = pr
-	}
-	if got := byID[11].Repo; got != "from-full-name" {
-		t.Fatalf("repo from destination.repository = %q", got)
-	}
-	if got := byID[12].Repo; got != "from-html" {
-		t.Fatalf("repo from html link = %q", got)
-	}
-	for id, pr := range byID {
-		if pr.Workspace != "ws" {
-			t.Fatalf("pr %d workspace = %q", id, pr.Workspace)
-		}
-	}
-}
-
-func TestListPRsPartialFailure(t *testing.T) {
-	mux := http.NewServeMux()
-	registerDiscovery(mux)
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 200, map[string]any{"values": []any{prJSON(1, "ok", "2026-01-03T09:00:00+00:00")}, "next": ""})
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/commit/{hash}/statuses", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 200, map[string]any{"values": []any{}, "next": ""})
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-b/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 403, map[string]any{"error": map[string]any{"message": "no access"}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	repos := []Repo{{Workspace: "ws", Repo: "repo-a"}, {Workspace: "ws", Repo: "repo-b"}}
-	result, err := client.ListPRs(context.Background(), listOptions(repos, "reviewer"))
-	if err != nil {
-		t.Fatalf("ListPRs should tolerate a partial failure: %v", err)
-	}
-	if len(result.PRs) != 1 {
-		t.Fatalf("got %d PRs, want 1", len(result.PRs))
-	}
-	if len(result.Failed) != 1 || result.Failed[0] != "repo-b" {
-		t.Fatalf("failed = %v, want [repo-b]", result.Failed)
-	}
-}
-
-func TestListPRsFailsWhenEveryRepoFails(t *testing.T) {
-	mux := http.NewServeMux()
-	registerDiscovery(mux)
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "boom"}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	_, err := client.ListPRs(context.Background(), listOptions([]Repo{{Workspace: "ws", Repo: "repo-a"}}, "reviewer"))
-	if err == nil {
-		t.Fatal("expected an error when every repo fails")
-	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("error = %v, want upstream message", err)
-	}
-}
-
-func TestListPRsCachedAndBustedByWrites(t *testing.T) {
-	var listCalls int
-	mux := http.NewServeMux()
-	registerDiscovery(mux)
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		listCalls++
-		writeJSON(t, w, 200, map[string]any{"values": []any{}, "next": ""})
-	})
-	mux.HandleFunc("POST /2.0/repositories/ws/repo-a/pullrequests/1/comments", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 200, map[string]any{"id": 10, "content": map[string]any{"raw": "hi", "html": "<p>hi</p>"}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	repos := []Repo{{Workspace: "ws", Repo: "repo-a"}}
-	for i := 0; i < 3; i++ {
-		if _, err := client.ListPRs(context.Background(), listOptions(repos, "reviewer")); err != nil {
-			t.Fatalf("ListPRs: %v", err)
-		}
-	}
-	if listCalls != 1 {
-		t.Fatalf("list called %d times, want 1 (cached)", listCalls)
-	}
-
-	if _, err := client.PostComment(context.Background(), repos[0], 1, "hi", nil, nil); err != nil {
-		t.Fatalf("PostComment: %v", err)
-	}
-	if _, err := client.ListPRs(context.Background(), listOptions(repos, "reviewer")); err != nil {
-		t.Fatalf("ListPRs after write: %v", err)
-	}
-	if listCalls != 2 {
-		t.Fatalf("list called %d times, want 2 (cache busted)", listCalls)
-	}
-}
-
 func TestErrorMapping(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +122,6 @@ func TestErrorMapping(t *testing.T) {
 
 func TestErrorMappingNonJSONBody(t *testing.T) {
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("GET /2.0/repositories/ws/missing/pullrequests/1", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -451,7 +148,6 @@ func TestPostCommentBodyShape(t *testing.T) {
 	}
 	var got request
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("POST /2.0/repositories/ws/repo-a/pullrequests/3/comments", func(w http.ResponseWriter, r *http.Request) {
 		got.method = r.Method
@@ -515,7 +211,6 @@ func TestPostCommentBodyShape(t *testing.T) {
 func TestPostCommentFromAnchorOmitsTo(t *testing.T) {
 	var body map[string]any
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("POST /2.0/repositories/ws/repo-a/pullrequests/3/comments", func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&body)
@@ -548,7 +243,6 @@ func TestListCommentsPaginationAndMapping(t *testing.T) {
 	var srvURL string
 
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests/2/comments", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -618,7 +312,6 @@ func TestListCommentsPaginationAndMapping(t *testing.T) {
 
 func TestPRDetailMapsMergeBaseAndBuilds(t *testing.T) {
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests/1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, 200, prJSON(1, "first", "2026-01-03T09:00:00+00:00"))
@@ -674,7 +367,6 @@ func TestPRDetailMapsMergeBaseAndBuilds(t *testing.T) {
 
 func TestPRDetailFallsBackWhenMergeBaseMissing(t *testing.T) {
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests/1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, 200, prJSON(1, "first", "2026-01-03T09:00:00+00:00"))
@@ -705,7 +397,6 @@ func TestReviewActions(t *testing.T) {
 	var mu sync.Mutex
 	calls := map[string]int{}
 	mux := http.NewServeMux()
-	registerDiscovery(mux)
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
 	mux.HandleFunc("/2.0/repositories/ws/repo-a/pullrequests/4/approve", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

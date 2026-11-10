@@ -39,6 +39,8 @@ type Store struct {
 type persisted struct {
 	Drafts map[string][]bitbucket.Draft     `json:"drafts"`
 	Viewed map[string]bitbucket.ViewedState `json:"viewed"`
+	// Scanner holds the reviewer scanner state (owned by internal/scanner).
+	Scanner json.RawMessage `json:"scanner,omitempty"`
 }
 
 // Open loads (or creates in memory) the state file at path.
@@ -80,6 +82,28 @@ func (s *Store) load() error {
 		s.data.Viewed = make(map[string]bitbucket.ViewedState)
 	}
 	return nil
+}
+
+// ScannerState returns the raw "scanner" blob, or nil when the state file has none.
+func (s *Store) ScannerState() json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.data.Scanner) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), s.data.Scanner...)
+}
+
+// SetScannerState replaces the "scanner" blob and persists the state file.
+func (s *Store) SetScannerState(state any) error {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode scanner state: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Scanner = encoded
+	return s.persist()
 }
 
 // Drafts returns a copy of the drafts for a pull request, in creation order.

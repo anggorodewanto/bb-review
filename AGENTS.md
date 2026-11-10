@@ -37,14 +37,21 @@ usable on a phone (via `tailscale serve`). A single Go binary embeds the React S
   "listen": "127.0.0.1:7777",
   "allowed_hosts": ["mybox.tail1234.ts.net"],
   "active_days": 14,                          // repo auto-discovery window
-  "discovery_ttl": "10m"                      // how long the discovered repo list is cached
+  "scan_interval": "60s",                     // reviewer scan tick
+  "full_sweep_interval": "6h"                 // re-query every active repo this often
 }
 ```
 
 Token precedence: `BB_REVIEW_TOKEN` env > `token` > `token_file` (whitespace trimmed).
-`repos` is optional: with it empty the reviewer list uses auto-discovered repos only
-(repos updated within `active_days`, unioned with `repos` when set). The author list uses
-the workspace-wide endpoint, so it never fans out per repo.
+`token_file` may hold the bare token or env style (`BB_REVIEW_TOKEN=...`, optional `export`
+and quotes; `#` comments and blank lines are ignored).
+
+`repos` is optional: it is an "always check" list. The reviewer list is maintained by an
+incremental scanner (`internal/scanner`): each tick (default 60 s) re-reads discovery and
+queries only new/changed/hot repos plus `repos`; a full sweep of every active repo happens
+every `full_sweep_interval` (default 6 h). Requests are served from scanner state, which is
+persisted in the state file under `"scanner"`. `POST /api/scan` forces a tick (debounced 10 s).
+The author list uses the workspace-wide endpoint, so it never fans out per repo.
 
 State (drafts, viewed): `~/.local/share/bb-review/state.json`.
 

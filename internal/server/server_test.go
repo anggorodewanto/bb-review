@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 	"github.com/anggorodewanto/bb-review/internal/config"
+	"github.com/anggorodewanto/bb-review/internal/scanner"
 	"github.com/anggorodewanto/bb-review/internal/store"
 )
 
@@ -32,6 +34,8 @@ type testEnv struct {
 	handler http.Handler
 	store   *store.Store
 	cfg     *config.Config
+	scanner *scanner.Scanner
+	client  *bitbucket.Client
 }
 
 func newTestEnv(t *testing.T, upstream http.Handler) *testEnv {
@@ -68,8 +72,26 @@ func newTestEnvWithConfig(t *testing.T, upstream http.Handler, cfg *config.Confi
 		Token:   cfg.Token,
 		Logger:  discardLogger(),
 	})
-	srv := New(Options{Config: cfg, Client: client, Store: st, Logger: discardLogger()})
-	return &testEnv{handler: srv.Handler(), store: st, cfg: cfg}
+	sc := scanner.New(scanner.Options{
+		Client:            client,
+		Store:             st,
+		Logger:            discardLogger(),
+		Workspace:         cfg.Workspace,
+		ConfigRepos:       cfg.RepoRefs(),
+		ActiveDays:        cfg.ActiveDaysOrDefault(),
+		ScanInterval:      cfg.ScanIntervalOrDefault(),
+		FullSweepInterval: cfg.FullSweepIntervalOrDefault(),
+	})
+	srv := New(Options{Config: cfg, Client: client, Store: st, Logger: discardLogger(), Scanner: sc})
+	return &testEnv{handler: srv.Handler(), store: st, cfg: cfg, scanner: sc, client: client}
+}
+
+// scan runs one synchronous reviewer scan against the fake upstream.
+func (e *testEnv) scan(t *testing.T) {
+	t.Helper()
+	if err := e.scanner.Tick(context.Background()); err != nil {
+		t.Fatalf("scanner.Tick: %v", err)
+	}
 }
 
 // do sends a request through the full middleware chain.
@@ -258,6 +280,9 @@ func TestPRDetailUpstreamError(t *testing.T) {
 func TestPRListPartialFailureSetsHeader(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
+	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
+		upstreamJSON(t, w, 200, map[string]any{"values": []any{}})
+	})
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
 		upstreamJSON(t, w, 200, map[string]any{"values": []any{map[string]any{
 			"id": 1, "title": "ok", "state": "OPEN",
@@ -275,6 +300,8 @@ func TestPRListPartialFailureSetsHeader(t *testing.T) {
 		Repos: []string{"repo-a", "repo-b"}, Listen: testHost,
 	}
 	env := newTestEnvWithConfig(t, mux, cfg)
+	env.scan(t)
+
 	rec := env.do(t, http.MethodGet, "/api/prs?role=reviewer", nil)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
@@ -288,20 +315,27 @@ func TestPRListPartialFailureSetsHeader(t *testing.T) {
 	}
 }
 
-func TestPRListAllReposFailReturnsUpstreamStatus(t *testing.T) {
+func TestPRListAfterFailedTickReturnsEmptyList(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
+	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
+		upstreamJSON(t, w, 200, map[string]any{"values": []any{}})
+	})
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
 		upstreamJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "all broken"}})
 	})
 	env := newTestEnv(t, mux)
+	env.scan(t)
+
 	rec := env.do(t, http.MethodGet, "/api/prs", nil)
-	if rec.Code != 500 {
-		t.Fatalf("status = %d, want the upstream status 500", rec.Code)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
-	body := decodeBody[errorBody](t, rec)
-	if body.Error != "all broken" || body.Status != 500 {
-		t.Fatalf("error body = %+v", body)
+	if got := rec.Header().Get("X-BBR-Partial"); got != "repo-a" {
+		t.Fatalf("X-BBR-Partial = %q, want repo-a", got)
+	}
+	if prs := decodeBody[[]bitbucket.PRSummary](t, rec); len(prs) != 0 {
+		t.Fatalf("prs = %+v, want none", prs)
 	}
 }
 

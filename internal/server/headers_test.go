@@ -121,6 +121,8 @@ func twoReposConfig() *config.Config {
 
 func TestPRListHeaders(t *testing.T) {
 	env := newTestEnvWithConfig(t, listUpstream(t, false), twoReposConfig())
+	env.scan(t)
+
 	rec := env.do(t, http.MethodGet, "/api/prs?role=reviewer", nil)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
@@ -147,6 +149,8 @@ func TestPRListHeaders(t *testing.T) {
 
 func TestPRListRateLimitedHeader(t *testing.T) {
 	env := newTestEnvWithConfig(t, listUpstream(t, true), twoReposConfig())
+	env.scan(t)
+
 	rec := env.do(t, http.MethodGet, "/api/prs?role=reviewer", nil)
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())

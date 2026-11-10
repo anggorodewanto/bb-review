@@ -26,7 +26,16 @@ const DefaultListen = "127.0.0.1:7777"
 const DefaultActiveDays = 14
 
 // DefaultDiscoveryTTL is how long the discovered repo list is cached.
+//
+// Deprecated: the reviewer list is now maintained by the scanner, which re-reads
+// discovery on every scan tick. The config key is still accepted and validated.
 const DefaultDiscoveryTTL = 10 * time.Minute
+
+// DefaultScanInterval is how often the reviewer scanner runs a tick.
+const DefaultScanInterval = 60 * time.Second
+
+// DefaultFullSweepInterval is how often the scanner re-queries every active repo.
+const DefaultFullSweepInterval = 6 * time.Hour
 
 // Config is ~/.config/bb-review/config.json.
 type Config struct {
@@ -41,8 +50,12 @@ type Config struct {
 	AllowedHosts []string `json:"allowed_hosts"`
 	// ActiveDays is the repo-discovery window in days (default 14).
 	ActiveDays int `json:"active_days,omitempty"`
-	// DiscoveryTTL is how long the discovered repo list is cached, e.g. "10m".
+	// DiscoveryTTL is deprecated: discovery is re-read on every scan tick.
 	DiscoveryTTL string `json:"discovery_ttl,omitempty"`
+	// ScanInterval is how often the reviewer scanner runs, e.g. "60s".
+	ScanInterval string `json:"scan_interval,omitempty"`
+	// FullSweepInterval is how often every active repo is re-queried, e.g. "6h".
+	FullSweepInterval string `json:"full_sweep_interval,omitempty"`
 	// StatePath overrides the local state file (~/.local/share/bb-review/state.json).
 	StatePath string `json:"state_path,omitempty"`
 	// BaseURL overrides the Bitbucket API root (useful for tests and proxies).
@@ -125,8 +138,45 @@ func (c *Config) resolveToken(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("read token_file %s: %w", path, err)
 	}
-	c.Token = strings.TrimSpace(string(raw))
+	c.Token = parseTokenFile(string(raw))
 	return nil
+}
+
+// parseTokenFile accepts either a bare token or env style content such as
+// `BB_REVIEW_TOKEN=ATATT...` / `export BB_REVIEW_TOKEN="ATATT..."`. Blank lines and
+// `#` comments are ignored, and the value may be single or double quoted.
+func parseTokenFile(raw string) string {
+	bare := ""
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, isAssignment := strings.Cut(line, "=")
+		if isAssignment {
+			if strings.TrimSpace(key) == TokenEnv {
+				return unquoteToken(strings.TrimSpace(value))
+			}
+			continue
+		}
+		if bare == "" {
+			bare = unquoteToken(line)
+		}
+	}
+	return bare
+}
+
+// unquoteToken strips one layer of matching single or double quotes.
+func unquoteToken(value string) string {
+	if len(value) < 2 {
+		return value
+	}
+	first, last := value[0], value[len(value)-1]
+	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+		return value[1 : len(value)-1]
+	}
+	return value
 }
 
 // validate checks the required fields and repo entries. Values are never echoed,
@@ -155,9 +205,20 @@ func (c *Config) validate() error {
 	if c.ActiveDays < 0 {
 		return fmt.Errorf("active_days must not be negative")
 	}
-	if ttl := strings.TrimSpace(c.DiscoveryTTL); ttl != "" {
-		if _, err := time.ParseDuration(ttl); err != nil {
-			return fmt.Errorf("discovery_ttl must be a duration such as \"10m\": %w", err)
+	for field, raw := range map[string]string{
+		"discovery_ttl":       c.DiscoveryTTL,
+		"scan_interval":       c.ScanInterval,
+		"full_sweep_interval": c.FullSweepInterval,
+	} {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("%s must be a duration such as \"10m\": %w", field, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("%s must be positive", field)
 		}
 	}
 
@@ -176,15 +237,33 @@ func (c *Config) ActiveDaysOrDefault() int {
 }
 
 // DiscoveryTTLOrDefault returns how long the discovered repo list is cached.
+//
+// Deprecated: the scanner re-reads discovery every tick; kept for config compatibility.
 func (c *Config) DiscoveryTTLOrDefault() time.Duration {
-	if strings.TrimSpace(c.DiscoveryTTL) == "" {
-		return DefaultDiscoveryTTL
+	return durationOrDefault(c.DiscoveryTTL, DefaultDiscoveryTTL)
+}
+
+// ScanIntervalOrDefault returns how often the reviewer scanner runs.
+func (c *Config) ScanIntervalOrDefault() time.Duration {
+	return durationOrDefault(c.ScanInterval, DefaultScanInterval)
+}
+
+// FullSweepIntervalOrDefault returns how often the scanner re-queries every repo.
+func (c *Config) FullSweepIntervalOrDefault() time.Duration {
+	return durationOrDefault(c.FullSweepInterval, DefaultFullSweepInterval)
+}
+
+// durationOrDefault parses raw, falling back to def for empty or invalid values.
+func durationOrDefault(raw string, def time.Duration) time.Duration {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return def
 	}
-	ttl, err := time.ParseDuration(c.DiscoveryTTL)
-	if err != nil || ttl <= 0 {
-		return DefaultDiscoveryTTL
+	parsed, err := time.ParseDuration(trimmed)
+	if err != nil || parsed <= 0 {
+		return def
 	}
-	return ttl
+	return parsed
 }
 
 // parseRepo turns a "repo" or "ws/repo" entry into a Repo.

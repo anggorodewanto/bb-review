@@ -25,18 +25,8 @@ const (
 	// DefaultConcurrency bounds concurrent upstream calls per batch.
 	DefaultConcurrency = 8
 
-	// DefaultDiscoveryTTL is how long the discovered repository list is cached.
-	DefaultDiscoveryTTL = 10 * time.Minute
-	// DefaultStaleAfter is how long a cached PR list is served without revalidating.
-	DefaultStaleAfter = 60 * time.Second
 	// DefaultActiveDays is the repo-discovery window in days.
 	DefaultActiveDays = 14
-	// defaultRateLimitBackoff applies to a 429 without a usable Retry-After.
-	defaultRateLimitBackoff = 60 * time.Second
-	// refreshRetryDelay throttles background refreshes after a failure.
-	refreshRetryDelay = 30 * time.Second
-	// refreshTimeout bounds one background refresh.
-	refreshTimeout = 60 * time.Second
 
 	statusCacheTTL  = 15 * time.Second
 	cacheSoftLimit  = 512
@@ -57,11 +47,6 @@ type Options struct {
 	HTTPClient *http.Client
 	// Logger receives non-fatal warnings about partial failures.
 	Logger *slog.Logger
-	// DiscoveryTTL caches the discovered repository list (default 10m).
-	DiscoveryTTL time.Duration
-	// StaleAfter is how long a cached PR list is served before revalidating
-	// in the background (default 60s).
-	StaleAfter time.Duration
 }
 
 // Client is a Bitbucket Cloud REST 2.0 client. It is safe for concurrent use.
@@ -75,28 +60,11 @@ type Client struct {
 	meMu sync.Mutex
 	me   *User
 
-	discoveryTTL time.Duration
-	staleAfter   time.Duration
-
 	cacheMu     sync.Mutex
-	listCache   map[string]listEntry
 	statusCache map[string]statusEntry
-	discovery   map[string]discoveryEntry
-
-	rateLimitedUntil time.Time
 }
 
 // listEntry is one cached PR list.
-type listEntry struct {
-	hasData     bool
-	fetchedAt   time.Time
-	prs         []PRSummary
-	failed      []string
-	rateLimited bool
-	refreshing  bool
-	retryAt     time.Time
-}
-
 type statusEntry struct {
 	at     time.Time
 	builds []BuildStatus
@@ -116,25 +84,13 @@ func New(opts Options) *Client {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	discoveryTTL := opts.DiscoveryTTL
-	if discoveryTTL <= 0 {
-		discoveryTTL = DefaultDiscoveryTTL
-	}
-	staleAfter := opts.StaleAfter
-	if staleAfter <= 0 {
-		staleAfter = DefaultStaleAfter
-	}
 	return &Client{
-		baseURL:      baseURL,
-		email:        opts.Email,
-		token:        opts.Token,
-		hc:           hc,
-		log:          logger,
-		discoveryTTL: discoveryTTL,
-		staleAfter:   staleAfter,
-		listCache:    make(map[string]listEntry),
-		statusCache:  make(map[string]statusEntry),
-		discovery:    make(map[string]discoveryEntry),
+		baseURL:     baseURL,
+		email:       opts.Email,
+		token:       opts.Token,
+		hc:          hc,
+		log:         logger,
+		statusCache: make(map[string]statusEntry),
 	}
 }
 
@@ -154,164 +110,59 @@ func (c *Client) Me(ctx context.Context) (User, error) {
 	return me, nil
 }
 
-// ListOptions selects which pull requests to list.
-type ListOptions struct {
-	// Role is "reviewer" (per-repo fan-out over discovered + configured repos) or
-	// "author" (one workspace-wide call, no per-repo fan-out).
-	Role string
-	// State is the pull request state filter; empty means OPEN.
-	State string
-	// Workspace is the workspace slug used for discovery and author lookups.
-	Workspace string
-	// Repos are the configured "always check" repos, unioned with discovery.
-	Repos []Repo
-	// ActiveDays is the repo-discovery window in days; 0 means DefaultActiveDays.
-	ActiveDays int
+// ActiveRepo is a repository inside the active discovery window.
+type ActiveRepo struct {
+	Repo      Repo
+	UpdatedOn time.Time // zero when Bitbucket omitted the timestamp
 }
 
-// ListResult is the outcome of a cross-repo pull request listing.
-type ListResult struct {
-	PRs []PRSummary
-	// Failed lists the repos that could not be fetched ("repo" or "ws/repo").
-	Failed []string
-	// FetchedAt is when the upstream data behind PRs was fetched. Cached copies
-	// keep the original timestamp so the UI can show its age.
-	FetchedAt time.Time
-	// RateLimited reports that Bitbucket answered 429; PRs may be partial or stale.
-	RateLimited bool
-}
-
-// ListPRs returns pull requests for the given role, sorted by updated_on
-// descending.
+// ReviewPRs returns the open pull requests of one repo where the current user is a
+// reviewer, oldest-updated last (sorted by updated_on desc). my_state and approvals
+// are filled in.
 //
-// Caching is stale-while-revalidate: a copy younger than StaleAfter is returned
-// as-is; an older copy is returned immediately and refreshed in the background
-// by a single-flight goroutine. Only the first request (no cache yet) blocks.
-func (c *Client) ListPRs(ctx context.Context, opts ListOptions) (ListResult, error) {
-	if opts.State == "" {
-		opts.State = "OPEN"
-	}
-	key := listCacheKey(opts)
-	now := time.Now()
-
-	c.cacheMu.Lock()
-	entry := c.listCache[key]
-	hasData := entry.hasData
-	if hasData && now.Sub(entry.fetchedAt) <= c.staleAfter {
-		result := entry.result()
-		c.cacheMu.Unlock()
-		return result, nil
-	}
-	backingOff := now.Before(c.rateLimitedUntil)
-	if hasData {
-		result := entry.result()
-		result.RateLimited = result.RateLimited || backingOff
-		shouldRefresh := !entry.refreshing && !backingOff && !now.Before(entry.retryAt)
-		if shouldRefresh {
-			entry.refreshing = true
-			c.listCache[key] = entry
-		}
-		c.cacheMu.Unlock()
-		if shouldRefresh {
-			go c.refreshList(key, opts)
-		}
-		return result, nil
-	}
-	if backingOff {
-		c.cacheMu.Unlock()
-		return ListResult{PRs: []PRSummary{}, Failed: []string{}, FetchedAt: now, RateLimited: true}, nil
-	}
-	c.cacheMu.Unlock()
-
-	result, err := c.fetchList(ctx, opts)
-	c.finishSyncFetch(key, result, err)
-	if err != nil {
-		return ListResult{}, err
-	}
-	return result, nil
-}
-
-// fetchList performs the upstream calls for one list request.
-func (c *Client) fetchList(ctx context.Context, opts ListOptions) (ListResult, error) {
-	started := time.Now()
+// Build states are intentionally not fetched here: that costs one request per PR,
+// and the scanner (which calls this for every active repo) must stay rate-limit
+// friendly. The PR detail endpoint still returns real build states.
+func (c *Client) ReviewPRs(ctx context.Context, repo Repo, state string) ([]PRSummary, error) {
 	me, err := c.Me(ctx)
 	if err != nil {
-		return ListResult{}, err
+		return nil, err
 	}
-
-	if opts.Role == "author" {
-		prs, err := c.authorPRs(ctx, opts, me.UUID)
-		if err != nil {
-			if !IsRateLimited(err) {
-				return ListResult{}, err
-			}
-			c.startBackoff(retryAfterOf(err))
-			return ListResult{PRs: []PRSummary{}, Failed: []string{}, FetchedAt: time.Now(), RateLimited: true}, nil
-		}
-		c.log.Info("pr list",
-			"role", "author",
-			"workspace", opts.Workspace,
-			"repos_discovered", 0,
-			"repos_queried", 0,
-			"prs", len(prs),
-			"duration_ms", time.Since(started).Milliseconds(),
-		)
-		return ListResult{PRs: prs, Failed: []string{}, FetchedAt: time.Now()}, nil
+	if state == "" {
+		state = "OPEN"
 	}
-
-	activeDays := opts.ActiveDays
-	if activeDays <= 0 {
-		activeDays = DefaultActiveDays
+	q := fmt.Sprintf(`reviewers.uuid="%s"`, me.UUID)
+	prs, _, err := c.listRepoPRs(ctx, repo, q, state, me.UUID)
+	if err != nil {
+		return nil, err
 	}
-	discovered, discoveryErr := c.discoverRepos(ctx, opts.Workspace, activeDays)
-	if discoveryErr != nil {
-		c.log.Warn("repository discovery failed", "workspace", opts.Workspace, "err", discoveryErr.Error())
-	}
-	repos := mergeRepos(opts.Repos, discovered)
-	if len(repos) == 0 {
-		if discoveryErr != nil {
-			return ListResult{}, discoveryErr
-		}
-		return ListResult{PRs: []PRSummary{}, Failed: []string{}, FetchedAt: time.Now()}, nil
-	}
-
-	fan := c.fanOut(ctx, repos, opts.State, me.UUID)
-	if !fan.rateLimited && len(fan.failed) == len(repos) && fan.firstErr != nil {
-		// Every repo failed in the same way: surface the upstream error.
-		return ListResult{}, fan.firstErr
-	}
-	c.log.Info("pr list",
-		"role", "reviewer",
-		"workspace", opts.Workspace,
-		"repos_discovered", len(discovered),
-		"repos_queried", len(repos),
-		"failed", len(fan.failed),
-		"rate_limited", fan.rateLimited,
-		"prs", len(fan.prs),
-		"duration_ms", time.Since(started).Milliseconds(),
-	)
-	return ListResult{
-		PRs:         fan.prs,
-		Failed:      fan.failed,
-		FetchedAt:   time.Now(),
-		RateLimited: fan.rateLimited,
-	}, nil
+	sortPRs(prs)
+	return prs, nil
 }
 
-// authorPRs uses the workspace-wide endpoint instead of fanning out per repo.
-func (c *Client) authorPRs(ctx context.Context, opts ListOptions, meUUID string) ([]PRSummary, error) {
+// AuthorPRs lists pull requests from the workspace-wide endpoint (no per-repo
+// fan-out), with build states filled in.
+func (c *Client) AuthorPRs(ctx context.Context, workspace, state string) ([]PRSummary, error) {
+	me, err := c.Me(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if state == "" {
+		state = "OPEN"
+	}
+
 	values := url.Values{}
-	values.Set("state", opts.State)
+	values.Set("state", state)
 	values.Set("pagelen", "50")
 	values.Set("fields", "+values.participants")
 	target := fmt.Sprintf("/2.0/workspaces/%s/pullrequests/%s?%s",
-		url.PathEscape(opts.Workspace), url.PathEscape(meUUID), values.Encode())
+		url.PathEscape(workspace), url.PathEscape(me.UUID), values.Encode())
 
 	raw, err := getPaged[apiPR](ctx, c, target)
 	if err != nil {
 		return nil, err
 	}
-	fallback := Repo{Workspace: opts.Workspace}
+	fallback := Repo{Workspace: workspace}
 	prs := make([]PRSummary, 0, len(raw))
 	repos := make([]Repo, 0, len(raw))
 	hashes := make([]string, 0, len(raw))
@@ -321,96 +172,13 @@ func (c *Client) authorPRs(ctx context.Context, opts ListOptions, meUUID string)
 			// Without a repository the row cannot be linked or opened.
 			continue
 		}
-		prs = append(prs, a.toSummary(repo, meUUID))
+		prs = append(prs, a.toSummary(repo, me.UUID))
 		repos = append(repos, repo)
 		hashes = append(hashes, a.Source.Commit.Hash)
 	}
 	c.fillBuildStates(ctx, repos, hashes, prs)
 	sortPRs(prs)
 	return prs, nil
-}
-
-// fanOutResult is the aggregate of the per-repo reviewer queries.
-type fanOutResult struct {
-	prs         []PRSummary
-	failed      []string
-	rateLimited bool
-	retryAfter  time.Duration
-	firstErr    error
-}
-
-// fanOut queries every repo concurrently (limit DefaultConcurrency). A 429 stops
-// the fan-out, keeps what already arrived and starts a backoff.
-func (c *Client) fanOut(ctx context.Context, repos []Repo, state, meUUID string) fanOutResult {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	q := fmt.Sprintf(`reviewers.uuid="%s"`, meUUID)
-	lists := make([][]PRSummary, len(repos))
-	hashes := make([][]string, len(repos))
-	errs := make([]error, len(repos))
-
-	var mu sync.Mutex
-	rateLimited := false
-	var retryAfter time.Duration
-
-	runConcurrently(len(repos), func(i int) {
-		if ctx.Err() != nil {
-			errs[i] = ctx.Err()
-			return
-		}
-		prs, commits, err := c.listRepoPRs(ctx, repos[i], q, state, meUUID)
-		if err == nil {
-			lists[i], hashes[i] = prs, commits
-			return
-		}
-		errs[i] = err
-		if !IsRateLimited(err) {
-			return
-		}
-		mu.Lock()
-		rateLimited = true
-		if apiErr, ok := AsAPIError(err); ok && apiErr.RetryAfter > retryAfter {
-			retryAfter = apiErr.RetryAfter
-		}
-		mu.Unlock()
-		cancel()
-	})
-
-	out := fanOutResult{
-		prs:         make([]PRSummary, 0, 32),
-		failed:      []string{},
-		rateLimited: rateLimited,
-		retryAfter:  retryAfter,
-	}
-	flatRepos := make([]Repo, 0, 16)
-	flatHashes := make([]string, 0, 16)
-	for i, repo := range repos {
-		err := errs[i]
-		abandoned := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-		if err != nil && !abandoned && !IsRateLimited(err) {
-			out.failed = append(out.failed, repoLabel(repos, repo))
-			if out.firstErr == nil {
-				out.firstErr = err
-			}
-			c.log.Warn("list pull requests failed", "repo", repo.String(), "err", err.Error())
-		}
-		for j, pr := range lists[i] {
-			out.prs = append(out.prs, pr)
-			flatRepos = append(flatRepos, repo)
-			flatHashes = append(flatHashes, hashes[i][j])
-		}
-	}
-
-	if rateLimited {
-		c.startBackoff(retryAfter)
-	}
-	if out.rateLimited {
-		return out
-	}
-	c.fillBuildStates(ctx, flatRepos, flatHashes, out.prs)
-	sortPRs(out.prs)
-	return out
 }
 
 // listRepoPRs fetches every page of one repo's pull request list. It returns the
@@ -445,52 +213,18 @@ func (c *Client) listRepoPRs(ctx context.Context, repo Repo, q, state, meUUID st
 	return prs, hashes, nil
 }
 
-// discoveryEntry is the cached result of a workspace repository listing.
-type discoveryEntry struct {
-	at         time.Time
-	activeDays int
-	repos      []Repo
-}
-
-// discoverRepos lists recently active repos in a workspace, cached for DiscoveryTTL.
-// Paging stops as soon as a repo is older than the active window (the listing is
-// sorted by -updated_on), so it never walks the whole workspace.
-func (c *Client) discoverRepos(ctx context.Context, workspace string, activeDays int) ([]Repo, error) {
+// DiscoverActiveRepos lists the repos updated inside the active window, sorted by
+// -updated_on. Paging stops at the first repo older than the cutoff, so it never
+// walks the whole workspace (1-4 requests for a busy workspace).
+//
+// No caching: the scanner calls this every tick and needs fresh updated_on values.
+func (c *Client) DiscoverActiveRepos(ctx context.Context, workspace string, activeDays int) ([]ActiveRepo, error) {
 	if strings.TrimSpace(workspace) == "" {
 		return nil, errors.New("workspace is required for repository discovery")
 	}
 	if activeDays <= 0 {
 		activeDays = DefaultActiveDays
 	}
-
-	c.cacheMu.Lock()
-	entry, ok := c.discovery[workspace]
-	c.cacheMu.Unlock()
-	if ok && entry.activeDays == activeDays && time.Since(entry.at) < c.discoveryTTL {
-		return append([]Repo(nil), entry.repos...), nil
-	}
-
-	repos, err := c.fetchWorkspaceRepos(ctx, workspace, activeDays)
-	if err != nil {
-		return nil, err
-	}
-	c.log.Debug("repository discovery", "workspace", workspace, "repos", len(repos), "active_days", activeDays)
-
-	c.cacheMu.Lock()
-	if len(c.discovery) > cacheSoftLimit {
-		c.discovery = make(map[string]discoveryEntry)
-	}
-	c.discovery[workspace] = discoveryEntry{
-		at:         time.Now(),
-		activeDays: activeDays,
-		repos:      append([]Repo(nil), repos...),
-	}
-	c.cacheMu.Unlock()
-	return repos, nil
-}
-
-// fetchWorkspaceRepos pages through the workspace repository listing.
-func (c *Client) fetchWorkspaceRepos(ctx context.Context, workspace string, activeDays int) ([]Repo, error) {
 	cutoff := time.Now().AddDate(0, 0, -activeDays)
 
 	values := url.Values{}
@@ -498,7 +232,7 @@ func (c *Client) fetchWorkspaceRepos(ctx context.Context, workspace string, acti
 	values.Set("pagelen", strconv.Itoa(reposPageLen))
 	values.Set("fields", "next,values.slug,values.updated_on")
 
-	repos := make([]Repo, 0, 64)
+	repos := make([]ActiveRepo, 0, reposPageLen)
 	next := fmt.Sprintf("/2.0/repositories/%s?%s", url.PathEscape(workspace), values.Encode())
 	for pageNo := 0; next != "" && pageNo < maxPages; pageNo++ {
 		var payload page[apiRepo]
@@ -517,35 +251,14 @@ func (c *Client) fetchWorkspaceRepos(ctx context.Context, workspace string, acti
 				// Sorted by -updated_on: everything that follows is older too.
 				return repos, nil
 			}
-			repos = append(repos, Repo{Workspace: workspace, Repo: slug})
+			repos = append(repos, ActiveRepo{
+				Repo:      Repo{Workspace: workspace, Repo: slug},
+				UpdatedOn: item.UpdatedOn.Time,
+			})
 		}
 		next = payload.Next
 	}
 	return repos, nil
-}
-
-// mergeRepos unions configured and discovered repos, de-duplicated, config first.
-func mergeRepos(configured, discovered []Repo) []Repo {
-	out := make([]Repo, 0, len(configured)+len(discovered))
-	seen := make(map[string]struct{}, len(configured)+len(discovered))
-	add := func(repo Repo) {
-		if repo.Workspace == "" || repo.Repo == "" {
-			return
-		}
-		key := strings.ToLower(repo.String())
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, repo)
-	}
-	for _, repo := range configured {
-		add(repo)
-	}
-	for _, repo := range discovered {
-		add(repo)
-	}
-	return out
 }
 
 // fillBuildStates aggregates commit statuses onto each summary, concurrently.
@@ -672,7 +385,7 @@ func (c *Client) PostComment(ctx context.Context, repo Repo, id int, raw string,
 	if err := c.sendJSON(ctx, http.MethodPost, prPath(repo, id)+"/comments", body, &out); err != nil {
 		return Comment{}, err
 	}
-	c.InvalidatePRCache()
+	c.InvalidateStatusCache()
 	return out.toComment(), nil
 }
 
@@ -692,7 +405,7 @@ func (c *Client) reviewAction(ctx context.Context, repo Repo, id int, action str
 		method = http.MethodDelete
 	}
 	err := c.sendJSON(ctx, method, prPath(repo, id)+"/"+action, nil, nil)
-	c.InvalidatePRCache()
+	c.InvalidateStatusCache()
 	if err == nil {
 		return nil
 	}
@@ -714,93 +427,16 @@ func (c *Client) File(ctx context.Context, repo Repo, commit, filePath string) (
 	return c.stream(ctx, target, "*/*")
 }
 
-// InvalidatePRCache drops cached pull request lists and commit statuses. Call it
-// after any write that can change list contents (comment, approve, request changes).
-func (c *Client) InvalidatePRCache() {
+// InvalidateStatusCache drops cached commit statuses, so a write (comment,
+// approve, request changes) is followed by fresh build data on the next detail read.
+func (c *Client) InvalidateStatusCache() {
 	c.cacheMu.Lock()
 	defer c.cacheMu.Unlock()
-	c.listCache = make(map[string]listEntry)
 	c.statusCache = make(map[string]statusEntry)
 }
 
-// result converts a cache entry into a ListResult with copied slices.
-func (e listEntry) result() ListResult {
-	fetchedAt := e.fetchedAt
-	if fetchedAt.IsZero() {
-		fetchedAt = time.Now()
-	}
-	return ListResult{
-		PRs:         append([]PRSummary(nil), e.prs...),
-		Failed:      append([]string(nil), e.failed...),
-		FetchedAt:   fetchedAt,
-		RateLimited: e.rateLimited,
-	}
-}
-
-// finishSyncFetch stores the result of a blocking fetch, or drops the placeholder.
-func (c *Client) finishSyncFetch(key string, result ListResult, err error) {
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-	if err != nil {
-		delete(c.listCache, key)
-		return
-	}
-	c.storeEntryLocked(key, result)
-}
-
-// refreshList revalidates one list entry in the background (single-flight).
-func (c *Client) refreshList(key string, opts ListOptions) {
-	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
-	defer cancel()
-
-	result, err := c.fetchList(ctx, opts)
-
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-	entry := c.listCache[key]
-	entry.refreshing = false
-	if err != nil {
-		entry.retryAt = time.Now().Add(refreshRetryDelay)
-		c.listCache[key] = entry
-		c.log.Warn("pr list refresh failed", "role", opts.Role, "err", err.Error())
-		return
-	}
-	c.storeEntryLocked(key, result)
-}
-
-// storeEntryLocked writes a cache entry. Callers must hold c.cacheMu.
-func (c *Client) storeEntryLocked(key string, result ListResult) {
-	if len(c.listCache) > cacheSoftLimit {
-		c.listCache = make(map[string]listEntry)
-	}
-	fetchedAt := result.FetchedAt
-	if fetchedAt.IsZero() {
-		fetchedAt = time.Now()
-	}
-	c.listCache[key] = listEntry{
-		hasData:     true,
-		fetchedAt:   fetchedAt,
-		prs:         append([]PRSummary(nil), result.PRs...),
-		failed:      append([]string(nil), result.Failed...),
-		rateLimited: result.RateLimited,
-	}
-}
-
-// startBackoff records a 429 backoff window (Retry-After wins when present).
-func (c *Client) startBackoff(d time.Duration) {
-	if d <= 0 {
-		d = defaultRateLimitBackoff
-	}
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
-	until := time.Now().Add(d)
-	if until.After(c.rateLimitedUntil) {
-		c.rateLimitedUntil = until
-	}
-}
-
-// retryAfterOf extracts the Retry-After hint from an upstream error.
-func retryAfterOf(err error) time.Duration {
+// RetryAfter returns the delay requested by an upstream 429 (0 when absent).
+func RetryAfter(err error) time.Duration {
 	if apiErr, ok := AsAPIError(err); ok {
 		return apiErr.RetryAfter
 	}
@@ -824,33 +460,6 @@ func (c *Client) storeStatuses(key string, builds []BuildStatus) {
 		c.statusCache = make(map[string]statusEntry)
 	}
 	c.statusCache[key] = statusEntry{at: time.Now(), builds: append([]BuildStatus(nil), builds...)}
-}
-
-// listCacheKey identifies a list request: role, state, workspace, window and repos.
-func listCacheKey(opts ListOptions) string {
-	parts := make([]string, 0, len(opts.Repos))
-	for _, r := range opts.Repos {
-		parts = append(parts, r.String())
-	}
-	return strings.Join([]string{
-		opts.Role,
-		opts.State,
-		opts.Workspace,
-		strconv.Itoa(opts.ActiveDays),
-		strings.Join(parts, ","),
-	}, "|")
-}
-
-// repoLabel names a repo in the X-BBR-Partial header: the bare slug when it lives in
-// the first repo's workspace, "ws/repo" otherwise.
-func repoLabel(repos []Repo, repo Repo) string {
-	if len(repos) == 0 {
-		return repo.Repo
-	}
-	if repo.Workspace == repos[0].Workspace {
-		return repo.Repo
-	}
-	return repo.String()
 }
 
 func sortPRs(prs []PRSummary) {

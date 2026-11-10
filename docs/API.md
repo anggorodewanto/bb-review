@@ -87,20 +87,22 @@ type ViewedState = { files: Record<string, string> }; // path -> hash of that fi
 type PRRef = { workspace: string; repo: string; id: number };   // GET /api/resolve
 ```
 
-Pull request list responses carry three optional headers:
+Pull request list responses carry four optional headers:
 
 | Header | Meaning |
 |---|---|
-| `X-BBR-Fetched-At` | RFC3339 timestamp of the data behind this list ("updated 30s ago") |
-| `X-BBR-Partial` | comma-separated repos (`repo` or `ws/repo`) that failed; the rest is still returned |
-| `X-BBR-Rate-Limited` | `1` when Bitbucket answered `429`; results may be partial/stale and the server is backing off |
+| `X-BBR-Fetched-At` | RFC3339 timestamp of the data behind this list ("updated 30s ago") — for `reviewer` it is the last completed scan tick |
+| `X-BBR-Partial` | comma-separated repos (`repo` or `ws/repo`) that failed in the last tick; the rest is still returned |
+| `X-BBR-Rate-Limited` | `1` when Bitbucket answered `429` and the scanner is backing off |
+| `X-BBR-Scanning` | `done/total` while the first full scan sweep is still running (results so far are returned) |
 
 ## Endpoints
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/me` | | `User` |
-| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc. `reviewer`: auto-discovered recently updated repos ∪ `config.repos`, one query per repo. `author`: one workspace-wide query, no fan-out. Cached stale-while-revalidate, see headers above. |
+| GET | `/api/prs?role=reviewer\|author&state=OPEN` | | `PRSummary[]` sorted by `updated_on` desc. `reviewer`: served immediately from the scanner state (union of the per-repo `open_review_prs`); never blocks on Bitbucket, and the scanner only tracks OPEN pull requests (the `state` parameter applies to `author`). `author`: one workspace-wide query, no fan-out. See headers above. |
+| POST | `/api/scan` | | `{started: boolean}` — triggers an immediate reviewer scan tick in the background. Debounced: `started` is `false` when a tick is running or one started less than 10 s ago. |
 | GET | `{pr}` | | `PRDetail` |
 | GET | `{pr}/diff` | | `text/plain` unified git diff (Bitbucket `/diff`, redirects followed) |
 | GET | `{pr}/comments` | | `Comment[]` (all pages, oldest first) |
@@ -127,21 +129,32 @@ Anything not under `/api/` serves the embedded SPA (`index.html` fallback for cl
   (scopes: `read:user:bitbucket`, `read:pullrequest:bitbucket`, `write:pullrequest:bitbucket`,
   `read:repository:bitbucket`). App passwords are deprecated; don't support them.
 - `GET /2.0/user` → me.
-- PR list, role=reviewer: there is no cross-repo "PRs I review" endpoint, so the server
-  first discovers active repos and then fans out (limit 8).
-  Discovery: `GET /2.0/repositories/{ws}?sort=-updated_on&pagelen=100&fields=next,values.slug,values.updated_on`,
-  paging only while `updated_on` is inside `active_days` (default 14). The result is
-  unioned with `config.repos` (deduplicated) and cached for `discovery_ttl` (default 10m).
-  Then for each repo:
-  `GET /2.0/repositories/{ws}/{repo}/pullrequests?state=OPEN&q=reviewers.uuid="{uuid}"`,
-  `pagelen=50`, `fields=+values.participants`.
+- PR list, role=reviewer: there is no cross-repo "PRs I review" endpoint, so an
+  incremental scanner owns this list (`internal/scanner`, one background loop, tick every
+  `scan_interval`, default 60 s):
+  - every tick re-reads discovery:
+    `GET /2.0/repositories/{ws}?sort=-updated_on&pagelen=100&fields=next,values.slug,values.updated_on`,
+    paging only while `updated_on` is inside `active_days` (default 14) — 1-4 requests;
+  - the tick queries a repo only when it was never scanned, its `updated_on` changed since
+    the last scan, it still has open review PRs ("hot"), or it is listed in `config.repos`;
+    every `full_sweep_interval` (default 6 h), or when no state exists yet, every active repo
+    is queried. Concurrency is 4;
+  - a repo query is
+    `GET /2.0/repositories/{ws}/{repo}/pullrequests?state=OPEN&q=reviewers.uuid="{uuid}"`,
+    `pagelen=50`, `fields=+values.participants`;
+  - repos that leave the active window keep their PRs only while those are non-empty, and
+    keep being re-checked ("hot") until they drain;
+  - on `429` the tick stops early (partial results are kept), and the scanner backs off for
+    `Retry-After` or 60 s, doubling up to 10 min;
+  - state is persisted after each tick under `"scanner"` in the state file: per repo
+    `last_scanned_updated_on`, `last_scanned_at`, `open_review_prs`, plus
+    `last_full_sweep_at` (and `last_tick_at`).
+  `GET /api/prs?role=reviewer` returns that state immediately; `POST /api/scan` starts a
+  tick on demand, and any write on a PR (comment, approve, request changes, submit)
+  re-queries that one repo.
 - PR list, role=author: one call,
   `GET /2.0/workspaces/{ws}/pullrequests/{uuid}?state=OPEN&pagelen=50&fields=+values.participants`
   (the uuid is URL-encoded, braces included). Pagination followed.
-- PR list caching: stale-while-revalidate. A copy younger than 60 s is served directly; an
-  older copy is served immediately and refreshed in a background goroutine (single-flight).
-  Only the first request blocks. On `429` the fan-out stops, partial results are kept,
-  `X-BBR-Rate-Limited: 1` is set and the server backs off for `Retry-After` (or 60 s).
 - Detail: `GET .../pullrequests/{id}`, `GET .../pullrequests/{id}/merge-base`,
   `GET /2.0/repositories/{ws}/{repo}/commit/{source_commit}/statuses`.
 - Diff: `GET .../pullrequests/{id}/diff` (302 → follow).

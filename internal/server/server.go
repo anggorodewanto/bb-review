@@ -16,6 +16,7 @@ import (
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 	"github.com/anggorodewanto/bb-review/internal/config"
+	"github.com/anggorodewanto/bb-review/internal/scanner"
 	"github.com/anggorodewanto/bb-review/internal/store"
 )
 
@@ -28,6 +29,8 @@ type Options struct {
 	// Assets is the embedded web/dist file system. May be nil or empty, in which
 	// case the SPA handler serves a "frontend not built" page.
 	Assets fs.FS
+	// Scanner serves the reviewer PR list from incremental scan state.
+	Scanner *scanner.Scanner
 }
 
 // Server serves the bb-review API and SPA.
@@ -38,6 +41,7 @@ type Server struct {
 	log      *slog.Logger
 	assets   fs.FS
 	hasIndex bool
+	scanner  *scanner.Scanner
 }
 
 // New returns a Server.
@@ -47,11 +51,12 @@ func New(opts Options) *Server {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	s := &Server{
-		cfg:    opts.Config,
-		bb:     opts.Client,
-		store:  opts.Store,
-		log:    logger,
-		assets: opts.Assets,
+		cfg:     opts.Config,
+		bb:      opts.Client,
+		store:   opts.Store,
+		log:     logger,
+		assets:  opts.Assets,
+		scanner: opts.Scanner,
 	}
 	if s.assets != nil {
 		if _, err := fs.Stat(s.assets, "index.html"); err == nil {
@@ -68,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("GET /api/resolve", s.handleResolve)
 	mux.HandleFunc("GET /api/prs", s.handlePRList)
+	mux.HandleFunc("POST /api/scan", s.handleScan)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}", s.handlePRDetail)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}/diff", s.handleDiff)
 	mux.HandleFunc("GET /api/prs/{ws}/{repo}/{id}/comments", s.handleComments)

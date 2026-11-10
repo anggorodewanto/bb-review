@@ -315,3 +315,84 @@ func TestInvalidDiscoverySettings(t *testing.T) {
 		t.Fatal("expected an error for a negative active_days")
 	}
 }
+
+func TestTokenFileFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "bare token", content: "ATATT-bare\n", want: "ATATT-bare"},
+		{name: "bare token with whitespace", content: "  ATATT-bare  \n\n", want: "ATATT-bare"},
+		{name: "env style", content: "BB_REVIEW_TOKEN=ATATT-env\n", want: "ATATT-env"},
+		{name: "export and double quotes", content: "export BB_REVIEW_TOKEN=\"ATATT-double\"\n", want: "ATATT-double"},
+		{name: "single quotes", content: "BB_REVIEW_TOKEN='ATATT-single'\n", want: "ATATT-single"},
+		{name: "comments and other vars", content: "# my token\n\nOTHER=1\nBB_REVIEW_TOKEN=ATATT-clean\n", want: "ATATT-clean"},
+		{name: "crlf", content: "BB_REVIEW_TOKEN=ATATT-crlf\r\n", want: "ATATT-crlf"},
+		{name: "spaces around equals", content: "BB_REVIEW_TOKEN = ATATT-spaced \n", want: "ATATT-spaced"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tokenFile := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(tokenFile, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write token file: %v", err)
+			}
+			path := writeConfig(t, `{"email":"me@example.com","token_file":"`+tokenFile+`","workspace":"ws"}`, 0o600)
+			logger, _ := bufferLogger()
+
+			cfg, err := Load(path, logger)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Token != tc.want {
+				t.Fatalf("token = %q, want %q", cfg.Token, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTokenFileIgnoresUnrelatedAssignments(t *testing.T) {
+	if got := parseTokenFile("OTHER=1\nBB_REVIEW_TOKEN=right\n"); got != "right" {
+		t.Fatalf("parseTokenFile = %q, want right", got)
+	}
+	if got := parseTokenFile("\n# only comments\n"); got != "" {
+		t.Fatalf("parseTokenFile = %q, want empty", got)
+	}
+}
+
+func TestScanIntervals(t *testing.T) {
+	path := writeConfig(t, validConfig, 0o600)
+	logger, _ := bufferLogger()
+	cfg, err := Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ScanIntervalOrDefault(); got != DefaultScanInterval {
+		t.Fatalf("scan interval = %v, want %v", got, DefaultScanInterval)
+	}
+	if got := cfg.FullSweepIntervalOrDefault(); got != DefaultFullSweepInterval {
+		t.Fatalf("full sweep interval = %v, want %v", got, DefaultFullSweepInterval)
+	}
+
+	path = writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","scan_interval":"30s","full_sweep_interval":"2h"}`, 0o600)
+	cfg, err = Load(path, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ScanIntervalOrDefault(); got != 30*time.Second {
+		t.Fatalf("scan interval = %v, want 30s", got)
+	}
+	if got := cfg.FullSweepIntervalOrDefault(); got != 2*time.Hour {
+		t.Fatalf("full sweep interval = %v, want 2h", got)
+	}
+}
+
+func TestInvalidScanIntervals(t *testing.T) {
+	logger, _ := bufferLogger()
+	for _, interval := range []string{"soon", "0s", "-5m"} {
+		path := writeConfig(t, `{"email":"me@example.com","token":"t","workspace":"ws","scan_interval":"`+interval+`"}`, 0o600)
+		if _, err := Load(path, logger); err == nil {
+			t.Fatalf("expected an error for scan_interval=%q", interval)
+		}
+	}
+}

@@ -2,30 +2,33 @@ package bitbucket
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"sync"
 	"testing"
 	"time"
 )
 
-// fakeWorkspace is a small in-memory Bitbucket workspace fake: a paged repo
-// listing plus a pull request list per repo.
-type fakeWorkspace struct {
-	t        *testing.T
-	server   *httptest.Server
-	repos    []fakeRepo // served in order across pages of reposPageLen
-	pageSize int
+func mustParseQuery(t *testing.T, raw string) neturl.Values {
+	t.Helper()
+	values, err := neturl.ParseQuery(raw)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", raw, err)
+	}
+	return values
+}
 
-	mu             sync.Mutex
-	discoveryCalls int
-	discoveryPage  int
-	listCalls      map[string]int
-	prTitle        string
-	blockList      chan struct{} // when non-nil, pull request lists wait for it
-	listStarted    chan struct{}
+// discoveryFake serves a paged workspace repository listing.
+type discoveryFake struct {
+	t        *testing.T
+	repos    []fakeRepo
+	pageSize int
+	server   *httptest.Server
+
+	mu    sync.Mutex
+	calls int
 }
 
 type fakeRepo struct {
@@ -33,37 +36,31 @@ type fakeRepo struct {
 	updatedOn time.Time
 }
 
-func newFakeWorkspace(t *testing.T, repos []fakeRepo) *fakeWorkspace {
+func newDiscoveryFake(t *testing.T, repos []fakeRepo, pageSize int) *discoveryFake {
 	t.Helper()
-	f := &fakeWorkspace{
-		t:         t,
-		repos:     repos,
-		pageSize:  reposPageLen,
-		listCalls: make(map[string]int),
-		prTitle:   "pr",
-	}
-
+	f := &discoveryFake{t: t, repos: repos, pageSize: pageSize}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(meJSON))
-	})
 	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("page") == "" {
-			if got := r.URL.Query().Get("sort"); got != "-updated_on" {
-				t.Errorf("discovery sort = %q, want -updated_on", got)
+		query := r.URL.Query()
+		if page := query.Get("page"); page == "" {
+			if got := query.Get("sort"); got != "-updated_on" {
+				t.Errorf("sort = %q, want -updated_on", got)
 			}
-			if got := r.URL.Query().Get("pagelen"); got != "100" {
-				t.Errorf("discovery pagelen = %q, want 100", got)
+			if got := query.Get("pagelen"); got != "100" {
+				t.Errorf("pagelen = %q, want 100", got)
 			}
-			if got := r.URL.Query().Get("fields"); got != "next,values.slug,values.updated_on" {
-				t.Errorf("discovery fields = %q", got)
+			if got := query.Get("fields"); got != "next,values.slug,values.updated_on" {
+				t.Errorf("fields = %q", got)
 			}
 		}
 
 		f.mu.Lock()
-		f.discoveryCalls++
-		f.discoveryPage++
-		page := f.discoveryPage
+		f.calls++
+		page := 1
+		fmt.Sscanf(r.URL.Query().Get("page"), "%d", &page)
+		if page == 0 {
+			page = 1
+		}
 		start := (page - 1) * f.pageSize
 		f.mu.Unlock()
 
@@ -80,509 +77,272 @@ func newFakeWorkspace(t *testing.T, repos []fakeRepo) *fakeWorkspace {
 		}
 		writeJSON(t, w, 200, map[string]any{"values": values, "next": next})
 	})
-	mux.HandleFunc("GET /2.0/repositories/{ws}/{repo}/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		repo := r.PathValue("repo")
-		f.mu.Lock()
-		f.listCalls[repo]++
-		title := f.prTitle
-		block := f.blockList
-		started := f.listStarted
-		f.mu.Unlock()
-
-		if block != nil {
-			if started != nil {
-				select {
-				case started <- struct{}{}:
-				default:
-				}
-			}
-			<-block
-		}
-
-		writeJSON(t, w, 200, map[string]any{
-			"values": []any{map[string]any{
-				"id": 1, "title": title, "state": "OPEN",
-				"updated_on": "2026-01-02T09:00:00+00:00",
-				"author":     map[string]any{"uuid": "uuid-author"},
-				"source":     map[string]any{"commit": map[string]any{"hash": ""}},
-			}},
-			"next": "",
-		})
-	})
 	f.server = httptest.NewServer(mux)
 	t.Cleanup(f.server.Close)
 	return f
 }
 
-func (f *fakeWorkspace) client(opts Options) *Client {
-	opts.BaseURL = f.server.URL
-	opts.Email = "me@example.com"
-	opts.Token = "tok"
-	if opts.Logger == nil {
-		opts.Logger = discardLogger()
-	}
-	return New(opts)
+func (f *discoveryFake) client() *Client {
+	return New(Options{
+		BaseURL: f.server.URL,
+		Email:   "me@example.com",
+		Token:   "tok",
+		Logger:  discardLogger(),
+	})
 }
 
-func (f *fakeWorkspace) listCallCount() int {
+func (f *discoveryFake) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	total := 0
-	for _, n := range f.listCalls {
-		total += n
-	}
-	return total
+	return f.calls
 }
 
-func (f *fakeWorkspace) discoveryCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.discoveryCalls
-}
-
-func (f *fakeWorkspace) setTitle(title string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.prTitle = title
-}
-
-func (f *fakeWorkspace) setBlock(ch chan struct{}) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.blockList = ch
-}
-
-func (f *fakeWorkspace) setStarted(ch chan struct{}) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.listStarted = ch
-}
-
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
-func TestDiscoveryStopsAtActiveDaysCutoff(t *testing.T) {
+func TestDiscoverActiveReposStopsAtCutoff(t *testing.T) {
 	now := time.Now()
-	f := newFakeWorkspace(t, []fakeRepo{
+	f := newDiscoveryFake(t, []fakeRepo{
 		{slug: "repo-a", updatedOn: now.Add(-24 * time.Hour)},
 		{slug: "repo-b", updatedOn: now.Add(-3 * 24 * time.Hour)},
 		{slug: "repo-old", updatedOn: now.Add(-30 * 24 * time.Hour)},
 		{slug: "repo-ancient", updatedOn: now.Add(-90 * 24 * time.Hour)},
-	})
-	f.pageSize = 2 // force pagination
+	}, 2)
 
-	client := f.client(Options{})
-	result, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-	})
+	repos, err := f.client().DiscoverActiveRepos(context.Background(), "ws", 14)
 	if err != nil {
-		t.Fatalf("ListPRs: %v", err)
+		t.Fatalf("DiscoverActiveRepos: %v", err)
 	}
-	if len(result.Failed) != 0 {
-		t.Fatalf("failed = %v", result.Failed)
+	if len(repos) != 2 {
+		t.Fatalf("repos = %+v, want 2", repos)
 	}
-	if len(result.PRs) != 2 {
-		t.Fatalf("prs = %d, want 2 (one per active repo)", len(result.PRs))
+	if repos[0].Repo.Repo != "repo-a" || repos[1].Repo.Repo != "repo-b" {
+		t.Fatalf("order = %q, %q", repos[0].Repo.Repo, repos[1].Repo.Repo)
 	}
-
-	f.mu.Lock()
-	calls := make(map[string]int, len(f.listCalls))
-	for repo, n := range f.listCalls {
-		calls[repo] = n
+	if repos[0].UpdatedOn.IsZero() {
+		t.Fatal("updated_on was not parsed")
 	}
-	pages := f.discoveryPage
-	f.mu.Unlock()
-
-	if calls["repo-a"] != 1 || calls["repo-b"] != 1 {
-		t.Fatalf("active repos queried = %v", calls)
-	}
-	if _, ok := calls["repo-old"]; ok {
-		t.Fatalf("paging should stop at the cutoff, but repo-old was queried: %v", calls)
-	}
-	if pages != 2 {
-		t.Fatalf("discovery pages fetched = %d, want 2", pages)
+	if got := f.callCount(); got != 2 {
+		t.Fatalf("discovery pages = %d, want 2 (stop at cutoff)", got)
 	}
 }
 
-func TestDiscoveryStopsBeforeWalkingTheWorkspace(t *testing.T) {
+func TestDiscoverActiveReposNeverWalksTheWorkspace(t *testing.T) {
 	now := time.Now()
-	// 500 repos would be 5 pages; the cutoff must stop after the first page.
 	repos := make([]fakeRepo, 0, 500)
 	for i := 0; i < 500; i++ {
-		updated := now.Add(-time.Duration(i) * 24 * time.Hour)
-		repos = append(repos, fakeRepo{slug: fmt.Sprintf("repo-%03d", i), updatedOn: updated})
+		repos = append(repos, fakeRepo{
+			slug:      fmt.Sprintf("repo-%03d", i),
+			updatedOn: now.Add(-time.Duration(i) * 24 * time.Hour),
+		})
 	}
-	f := newFakeWorkspace(t, repos)
-	client := f.client(Options{})
+	f := newDiscoveryFake(t, repos, reposPageLen)
 
-	result, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-	})
+	got, err := f.client().DiscoverActiveRepos(context.Background(), "ws", 14)
 	if err != nil {
-		t.Fatalf("ListPRs: %v", err)
+		t.Fatalf("DiscoverActiveRepos: %v", err)
 	}
-	if got := f.discoveryCount(); got != 1 {
-		t.Fatalf("discovery pages = %d, want 1 (early stop)", got)
+	if len(got) != 14 {
+		t.Fatalf("active repos = %d, want 14", len(got))
 	}
-	// repos are now-0d .. now-499d; the now-14d one is already past the cutoff.
-	if len(result.PRs) != 14 {
-		t.Fatalf("prs = %d, want 14 active repos", len(result.PRs))
-	}
-}
-
-func TestDiscoveryUnionsConfiguredRepos(t *testing.T) {
-	now := time.Now()
-	f := newFakeWorkspace(t, []fakeRepo{
-		{slug: "repo-a", updatedOn: now.Add(-time.Hour)},
-		{slug: "repo-b", updatedOn: now.Add(-2 * time.Hour)},
-	})
-
-	client := f.client(Options{})
-	configured := []Repo{
-		{Workspace: "ws", Repo: "repo-b"}, // duplicate of discovery
-		{Workspace: "ws", Repo: "extra"},  // config only
-		{Workspace: "other", Repo: "far"}, // other workspace, config only
-	}
-	if _, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", Repos: configured, ActiveDays: 14,
-	}); err != nil {
-		t.Fatalf("ListPRs: %v", err)
-	}
-
-	f.mu.Lock()
-	calls := make(map[string]int, len(f.listCalls))
-	for repo, n := range f.listCalls {
-		calls[repo] = n
-	}
-	f.mu.Unlock()
-
-	want := map[string]int{"repo-a": 1, "repo-b": 1, "extra": 1, "far": 1}
-	for repo, n := range want {
-		if calls[repo] != n {
-			t.Fatalf("repo %q queried %d times, want %d (calls: %v)", repo, calls[repo], n, calls)
-		}
-	}
-	if len(calls) != len(want) {
-		t.Fatalf("queried repos = %v, want %v", calls, want)
+	if calls := f.callCount(); calls != 1 {
+		t.Fatalf("discovery pages = %d, want 1", calls)
 	}
 }
 
-func TestDiscoveryCachedForTTL(t *testing.T) {
-	now := time.Now()
-	f := newFakeWorkspace(t, []fakeRepo{{slug: "repo-a", updatedOn: now.Add(-time.Hour)}})
-	client := f.client(Options{DiscoveryTTL: time.Minute})
+func TestDiscoverActiveReposIsNotCached(t *testing.T) {
+	f := newDiscoveryFake(t, []fakeRepo{{slug: "repo-a", updatedOn: time.Now().Add(-time.Hour)}}, 100)
+	client := f.client()
 
-	// Different state → different list cache key → both hit the repo listing.
-	for _, state := range []string{"OPEN", "MERGED"} {
-		if _, err := client.ListPRs(context.Background(), ListOptions{
-			Role: "reviewer", State: state, Workspace: "ws", ActiveDays: 14,
-		}); err != nil {
-			t.Fatalf("ListPRs(%s): %v", state, err)
-		}
+	if _, err := client.DiscoverActiveRepos(context.Background(), "ws", 14); err != nil {
+		t.Fatalf("first discovery: %v", err)
 	}
-	if got := f.discoveryCount(); got != 1 {
-		t.Fatalf("discovery calls = %d, want 1 (cached)", got)
+	if _, err := client.DiscoverActiveRepos(context.Background(), "ws", 14); err != nil {
+		t.Fatalf("second discovery: %v", err)
+	}
+	if calls := f.callCount(); calls != 2 {
+		t.Fatalf("discovery calls = %d, want 2 (no cache)", calls)
 	}
 }
 
-func TestDiscoveryFailureFallsBackToConfiguredRepos(t *testing.T) {
-	var listCalls int
+func TestDiscoverActiveReposRejectsEmptyWorkspace(t *testing.T) {
+	client := New(Options{BaseURL: "http://127.0.0.1:1", Email: "me@example.com", Token: "tok", Logger: discardLogger()})
+	if _, err := client.DiscoverActiveRepos(context.Background(), "", 14); err == nil {
+		t.Fatal("expected an error for an empty workspace")
+	}
+}
+
+func TestReviewPRsQueryPaginationAndMapping(t *testing.T) {
+	var queries []string
+	var srvURL string
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "discovery down"}})
-	})
 	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		listCalls++
-		writeJSON(t, w, 200, map[string]any{"values": []any{map[string]any{
-			"id": 1, "title": "x", "state": "OPEN", "updated_on": "2026-01-02T09:00:00+00:00",
-			"source": map[string]any{"commit": map[string]any{"hash": ""}},
-		}}})
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("page") == "2" {
+			writeJSON(t, w, 200, map[string]any{
+				"values": []any{prJSON(3, "third", "2026-01-05T09:00:00+00:00")},
+				"next":   "",
+			})
+			return
+		}
+		writeJSON(t, w, 200, map[string]any{
+			"values": []any{
+				prJSON(1, "first", "2026-01-03T09:00:00+00:00"),
+				prJSON(2, "second", "2026-01-04T09:00:00+00:00"),
+			},
+			"next": srvURL + "/2.0/repositories/ws/repo-a/pullrequests?page=2",
+		})
+	})
+	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/commit/{hash}/statuses", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("ReviewPRs must not fetch commit statuses")
+		writeJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "unexpected"}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
+	srvURL = srv.URL
 
 	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	result, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws",
-		Repos:      []Repo{{Workspace: "ws", Repo: "repo-a"}},
-		ActiveDays: 14,
-	})
+	prs, err := client.ReviewPRs(context.Background(), Repo{Workspace: "ws", Repo: "repo-a"}, "OPEN")
 	if err != nil {
-		t.Fatalf("ListPRs: %v", err)
+		t.Fatalf("ReviewPRs: %v", err)
 	}
-	if listCalls != 1 {
-		t.Fatalf("configured repo list calls = %d, want 1", listCalls)
+	if len(prs) != 3 {
+		t.Fatalf("prs = %d, want 3", len(prs))
 	}
-	if len(result.PRs) != 1 {
-		t.Fatalf("prs = %d, want 1", len(result.PRs))
+	if queries[0] == "" {
+		t.Fatal("no query recorded")
 	}
-}
-
-func TestStaleWhileRevalidate(t *testing.T) {
-	now := time.Now()
-	f := newFakeWorkspace(t, []fakeRepo{{slug: "repo-a", updatedOn: now.Add(-time.Hour)}})
-	client := f.client(Options{StaleAfter: 30 * time.Millisecond})
-
-	// First request blocks and fills the cache.
-	first, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-	})
-	if err != nil {
-		t.Fatalf("first ListPRs: %v", err)
+	parsed := mustParseQuery(t, queries[0])
+	if got, want := parsed.Get("q"), `reviewers.uuid="uuid-me"`; got != want {
+		t.Fatalf("q = %q, want %q", got, want)
 	}
-	if got := f.listCallCount(); got != 1 {
-		t.Fatalf("upstream list calls = %d, want 1", got)
+	if got := parsed.Get("state"); got != "OPEN" {
+		t.Fatalf("state = %q", got)
 	}
-	if first.FetchedAt.IsZero() {
-		t.Fatal("FetchedAt is zero")
+	if got := parsed.Get("pagelen"); got != "50" {
+		t.Fatalf("pagelen = %q", got)
 	}
-	if first.PRs[0].Title != "pr" {
-		t.Fatalf("title = %q", first.PRs[0].Title)
+	if got := parsed.Get("fields"); got != "+values.participants" {
+		t.Fatalf("fields = %q", got)
 	}
 
-	// Within the freshness window: served from cache, no upstream call.
-	if _, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-	}); err != nil {
-		t.Fatalf("fresh ListPRs: %v", err)
-	}
-	if got := f.listCallCount(); got != 1 {
-		t.Fatalf("fresh cache hit made %d upstream calls, want 1 total", got)
-	}
-
-	// Make the refresh block so we can observe single-flight behaviour.
-	block := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(block) }) }
-	defer release()
-
-	started := make(chan struct{}, 8)
-	f.setStarted(started)
-	f.setBlock(block)
-	f.setTitle("pr-v2")
-
-	time.Sleep(60 * time.Millisecond)
-
-	// Stale request: returns the old copy immediately and starts one refresh.
-	stale, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-	})
-	if err != nil {
-		t.Fatalf("stale ListPRs: %v", err)
-	}
-	if stale.PRs[0].Title != "pr" {
-		t.Fatalf("stale title = %q, want the old copy", stale.PRs[0].Title)
-	}
-
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("background refresh did not start")
-	}
-
-	// Further stale requests must not start a second refresh.
-	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := client.ListPRs(context.Background(), ListOptions{
-				Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-			}); err != nil {
-				t.Errorf("concurrent stale ListPRs: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-	if got := f.listCallCount(); got != 2 {
-		t.Fatalf("upstream list calls = %d, want 2 (single-flight)", got)
-	}
-
-	release()
-	f.setBlock(nil)
-
-	// The refresh lands: the next request serves the new data.
-	waitFor(t, 2*time.Second, "refreshed data", func() bool {
-		result, err := client.ListPRs(context.Background(), ListOptions{
-			Role: "reviewer", State: "OPEN", Workspace: "ws", ActiveDays: 14,
-		})
-		return err == nil && len(result.PRs) == 1 && result.PRs[0].Title == "pr-v2"
-	})
-}
-
-func TestRateLimitKeepsPartialResultsAndBacksOff(t *testing.T) {
-	now := time.Now()
-	_ = now
-
-	var mu sync.Mutex
-	calls := map[string]int{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/repositories/ws", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, 200, map[string]any{"values": []any{}})
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-ok/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls["repo-ok"]++
-		mu.Unlock()
-		writeJSON(t, w, 200, map[string]any{"values": []any{map[string]any{
-			"id": 1, "title": "kept", "state": "OPEN", "updated_on": "2026-01-02T09:00:00+00:00",
-			"source": map[string]any{"commit": map[string]any{"hash": ""}},
-		}}})
-	})
-	mux.HandleFunc("GET /2.0/repositories/ws/repo-limited/pullrequests", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		calls["repo-limited"]++
-		mu.Unlock()
-		time.Sleep(30 * time.Millisecond) // let the healthy repo finish first
-		w.Header().Set("Retry-After", "5")
-		writeJSON(t, w, 429, map[string]any{"error": map[string]any{"message": "rate limited"}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	opts := ListOptions{
-		Role: "reviewer", State: "OPEN", Workspace: "ws",
-		Repos:      []Repo{{Workspace: "ws", Repo: "repo-ok"}, {Workspace: "ws", Repo: "repo-limited"}},
-		ActiveDays: 14,
-	}
-	result, err := client.ListPRs(context.Background(), opts)
-	if err != nil {
-		t.Fatalf("ListPRs must tolerate a 429: %v", err)
-	}
-	if !result.RateLimited {
-		t.Fatal("RateLimited = false, want true")
-	}
-	if len(result.PRs) != 1 || result.PRs[0].Title != "kept" {
-		t.Fatalf("partial results = %+v, want the healthy repo's PR", result.PRs)
-	}
-	if len(result.Failed) != 0 {
-		t.Fatalf("failed = %v, want none (429 is reported separately)", result.Failed)
-	}
-
-	mu.Lock()
-	before := calls["repo-ok"] + calls["repo-limited"]
-	mu.Unlock()
-
-	// During the backoff window the cached copy is served without new calls.
-	second, err := client.ListPRs(context.Background(), opts)
-	if err != nil {
-		t.Fatalf("second ListPRs: %v", err)
-	}
-	if !second.RateLimited {
-		t.Fatal("second call should still report the rate limit")
-	}
-	mu.Lock()
-	after := calls["repo-ok"] + calls["repo-limited"]
-	mu.Unlock()
-	if after != before {
-		t.Fatalf("upstream calls during backoff = %d, want %d", after, before)
-	}
-}
-
-func TestParseRetryAfter(t *testing.T) {
-	future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
-	past := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
-
-	tests := []struct {
-		name  string
-		value string
-		min   time.Duration
-		max   time.Duration
-	}{
-		{name: "seconds", value: "12", min: 12 * time.Second, max: 12 * time.Second},
-		{name: "zero", value: "0"},
-		{name: "negative", value: "-4"},
-		{name: "garbage", value: "soon"},
-		{name: "empty", value: ""},
-		{name: "http date", value: future, min: 25 * time.Second, max: 31 * time.Second},
-		{name: "http date in the past", value: past},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseRetryAfter(tc.value)
-			if tc.min == 0 && tc.max == 0 {
-				if got != 0 {
-					t.Fatalf("parseRetryAfter(%q) = %v, want 0", tc.value, got)
-				}
-				return
-			}
-			if got < tc.min || got > tc.max {
-				t.Fatalf("parseRetryAfter(%q) = %v, want between %v and %v", tc.value, got, tc.min, tc.max)
-			}
-		})
-	}
-}
-
-func TestMergeReposDeduplicates(t *testing.T) {
-	configured := []Repo{
-		{Workspace: "ws", Repo: "repo-a"},
-		{Workspace: "other", Repo: "repo-b"},
-	}
-	discovered := []Repo{
-		{Workspace: "ws", Repo: "repo-a"}, // duplicate
-		{Workspace: "WS", Repo: "Repo-A"}, // duplicate, different case
-		{Workspace: "ws", Repo: "repo-c"}, // new
-		{Workspace: "", Repo: "broken"},   // dropped
-	}
-	got := mergeRepos(configured, discovered)
-	want := []Repo{
-		{Workspace: "ws", Repo: "repo-a"},
-		{Workspace: "other", Repo: "repo-b"},
-		{Workspace: "ws", Repo: "repo-c"},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("merged = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("merged[%d] = %v, want %v", i, got[i], want[i])
+	wantOrder := []int{3, 2, 1}
+	for i, want := range wantOrder {
+		if prs[i].ID != want {
+			t.Fatalf("order[%d] = %d, want %d", i, prs[i].ID, want)
 		}
 	}
+	if prs[2].MyState != ReviewApproved || prs[2].Approvals != 1 {
+		t.Fatalf("my_state/approvals = %q/%d", prs[2].MyState, prs[2].Approvals)
+	}
+	if prs[2].BuildState != BuildNone {
+		t.Fatalf("build_state = %q, want NONE (not fetched by the scanner path)", prs[2].BuildState)
+	}
 }
 
-func TestAuthorRateLimitIsReported(t *testing.T) {
+func TestReviewPRsPropagatesRateLimit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(meJSON)) })
-	mux.HandleFunc("GET /2.0/workspaces/ws/pullrequests/{user}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "1")
+	mux.HandleFunc("GET /2.0/repositories/ws/repo-a/pullrequests", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
 		writeJSON(t, w, 429, map[string]any{"error": map[string]any{"message": "slow down"}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	result, err := client.ListPRs(context.Background(), ListOptions{
-		Role: "author", State: "OPEN", Workspace: "ws", ActiveDays: 14,
+	_, err := client.ReviewPRs(context.Background(), Repo{Workspace: "ws", Repo: "repo-a"}, "OPEN")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !IsRateLimited(err) {
+		t.Fatalf("IsRateLimited = false for %v", err)
+	}
+	if got := RetryAfter(err); got != 7*time.Second {
+		t.Fatalf("RetryAfter = %v, want 7s", got)
+	}
+}
+
+func TestAuthorPRsUsesWorkspaceEndpoint(t *testing.T) {
+	var escapedPath, query, selectedUser string
+	var repoCalls int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /2.0/user", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"uuid":"{1234-abcd}","display_name":"Me"}`))
 	})
+	mux.HandleFunc("GET /2.0/workspaces/ws/pullrequests/{user}", func(w http.ResponseWriter, r *http.Request) {
+		escapedPath = r.URL.EscapedPath()
+		selectedUser = r.PathValue("user")
+		query = r.URL.RawQuery
+		writeJSON(t, w, 200, map[string]any{
+			"values": []any{
+				map[string]any{
+					"id": 11, "title": "authored", "state": "OPEN",
+					"updated_on":  "2026-01-02T09:00:00+00:00",
+					"destination": map[string]any{"repository": map[string]any{"full_name": "ws/from-full-name"}},
+					"source":      map[string]any{"branch": map[string]any{"name": "feat"}},
+				},
+				map[string]any{
+					"id": 12, "title": "fallback", "state": "OPEN",
+					"updated_on": "2026-01-03T09:00:00+00:00",
+					"links":      map[string]any{"html": map[string]any{"href": "https://bitbucket.org/ws/from-html/pull-requests/12"}},
+				},
+			},
+			"next": "",
+		})
+	})
+	mux.HandleFunc("GET /2.0/repositories/", func(w http.ResponseWriter, r *http.Request) {
+		repoCalls++
+		writeJSON(t, w, 500, map[string]any{"error": map[string]any{"message": "should not be called"}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := New(Options{BaseURL: srv.URL, Email: "me@example.com", Token: "tok", Logger: discardLogger()})
+	prs, err := client.AuthorPRs(context.Background(), "ws", "OPEN")
 	if err != nil {
-		t.Fatalf("author 429 should not fail the request: %v", err)
+		t.Fatalf("AuthorPRs: %v", err)
 	}
-	if !result.RateLimited {
-		t.Fatal("RateLimited = false, want true")
+	if repoCalls != 0 {
+		t.Fatalf("author role must not fan out per repo (calls = %d)", repoCalls)
 	}
-	if len(result.PRs) != 0 {
-		t.Fatalf("prs = %+v, want none", result.PRs)
+	if want := "/2.0/workspaces/ws/pullrequests/%7B1234-abcd%7D"; escapedPath != want {
+		t.Fatalf("path = %q, want %q", escapedPath, want)
+	}
+	if selectedUser != "{1234-abcd}" {
+		t.Fatalf("selected user = %q, want the decoded uuid", selectedUser)
+	}
+
+	parsed := mustParseQuery(t, query)
+	if got := parsed.Get("state"); got != "OPEN" {
+		t.Fatalf("state = %q", got)
+	}
+	if got := parsed.Get("pagelen"); got != "50" {
+		t.Fatalf("pagelen = %q", got)
+	}
+	if got := parsed.Get("fields"); got != "+values.participants" {
+		t.Fatalf("fields = %q", got)
+	}
+	if got := parsed.Get("q"); got != "" {
+		t.Fatalf("author listing must not send a q filter, got %q", got)
+	}
+
+	if len(prs) != 2 {
+		t.Fatalf("prs = %d, want 2", len(prs))
+	}
+	byID := make(map[int]PRSummary, len(prs))
+	for _, pr := range prs {
+		byID[pr.ID] = pr
+	}
+	if got := byID[11].Repo; got != "from-full-name" {
+		t.Fatalf("repo from destination.repository = %q", got)
+	}
+	if got := byID[12].Repo; got != "from-html" {
+		t.Fatalf("repo from html link = %q", got)
+	}
+	for id, pr := range byID {
+		if pr.Workspace != "ws" {
+			t.Fatalf("pr %d workspace = %q", id, pr.Workspace)
+		}
 	}
 }
-
-func TestDiscoveryRejectsEmptyWorkspace(t *testing.T) {
-	client := New(Options{BaseURL: "http://127.0.0.1:1", Email: "me@example.com", Token: "tok", Logger: discardLogger()})
-	if _, err := client.discoverRepos(context.Background(), "", 14); err == nil {
-		t.Fatal("expected an error for an empty workspace")
-	}
-}
-
-// guard against accidental JSON drift in the fake
-var _ = json.Marshal

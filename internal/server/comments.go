@@ -42,6 +42,7 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		s.writeUpstream(w, "post comment", err)
 		return
 	}
+	s.refreshRepoAfterWrite(r.Context(), repo)
 	writeJSON(w, http.StatusOK, comment)
 }
 

@@ -34,6 +34,7 @@ func (s *Server) handleReviewAction(kind reviewActionKind, add bool) http.Handle
 			s.writeUpstream(w, "review action", err)
 			return
 		}
+		s.refreshRepoAfterWrite(ctx, repo)
 
 		detail, err := s.bb.PRDetail(ctx, repo, id)
 		if err != nil {
