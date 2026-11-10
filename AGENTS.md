@@ -67,3 +67,8 @@ State (drafts, viewed): `~/.local/share/bb-review/state.json`.
 - `make build` — builds web then Go binary to `bin/bb-review`
 - `make test` — `go test ./...` and `npm --prefix web test`
 - `make dev` — Go server on :7777 + Vite dev server (proxies `/api` to :7777)
+- The app runs as a systemd user service (`bb-review`) on 127.0.0.1:7777, started at boot.
+  - `make deploy` — rebuild and restart the service. Run it after changes so the live app picks them up.
+  - `make status`, `make start|stop|restart`, `make service-install|service-uninstall`
+  - `make logs-recent [LINES=n]` — print recent logs and exit. **Agents: never run `make logs`; it follows forever.**
+  - Don't start `./bin/bb-review` by hand while the service runs: the port is taken.

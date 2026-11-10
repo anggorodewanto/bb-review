@@ -6,7 +6,12 @@ NPM ?= npm
 LISTEN ?= 127.0.0.1:7777
 WEB_HAS_PKG := $(wildcard web/package.json)
 
-.PHONY: all build web test lint dev fmt clean
+SERVICE := bb-review
+UNIT_DIR := $(HOME)/.config/systemd/user
+SYSTEMCTL := systemctl --user
+
+.PHONY: all build web test lint dev fmt clean help \
+	service-install service-uninstall start stop restart status logs logs-recent deploy
 
 all: build
 
@@ -43,6 +48,47 @@ dev:
 ## fmt: gofmt the tree.
 fmt:
 	$(GO) fmt ./...
+
+## help: list make targets.
+help:
+	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## /  /'
+
+## service-install: install + enable the systemd user service (starts now and at boot).
+service-install: build
+	@mkdir -p $(UNIT_DIR)
+	sed 's|@BIN@|$(CURDIR)/$(BIN)|' contrib/bb-review.service > $(UNIT_DIR)/$(SERVICE).service
+	$(SYSTEMCTL) daemon-reload
+	$(SYSTEMCTL) enable --now $(SERVICE)
+	loginctl enable-linger "$$USER"
+	@$(SYSTEMCTL) --no-pager status $(SERVICE) | head -3
+
+## service-uninstall: stop, disable and remove the systemd user service.
+service-uninstall:
+	-$(SYSTEMCTL) disable --now $(SERVICE)
+	rm -f $(UNIT_DIR)/$(SERVICE).service
+	$(SYSTEMCTL) daemon-reload
+
+## start / stop / restart / status: control the running service.
+start:
+	$(SYSTEMCTL) start $(SERVICE)
+stop:
+	$(SYSTEMCTL) stop $(SERVICE)
+restart:
+	$(SYSTEMCTL) restart $(SERVICE)
+status:
+	@$(SYSTEMCTL) --no-pager status $(SERVICE)
+
+## logs: follow service logs (LINES=n to show more history).
+logs:
+	journalctl --user -u $(SERVICE) -f -n $(or $(LINES),50)
+
+## logs-recent: print the last LINES (default 100) log lines and exit (safe for agents).
+logs-recent:
+	@journalctl --user -u $(SERVICE) --no-pager -n $(or $(LINES),100)
+
+## deploy: rebuild, then restart the service so it runs the new binary.
+deploy: build restart
+	@sleep 2; $(SYSTEMCTL) is-active $(SERVICE)
 
 ## clean: remove build output.
 clean:

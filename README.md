@@ -37,13 +37,12 @@ One Go binary with the React app embedded. It runs on your machine, so your API 
 ## Start on boot (Linux, systemd)
 
 ```sh
-cp contrib/bb-review.service ~/.config/systemd/user/   # adjust ExecStart if the repo lives elsewhere
-systemctl --user daemon-reload
-systemctl --user enable --now bb-review
-loginctl enable-linger "$USER"   # start at boot, before you log in
+make service-install   # build, install + enable the user service, enable linger (starts at boot)
+make deploy            # rebuild and restart after code changes
+make status            # or: start / stop / restart
+make logs              # follow logs (make logs-recent prints and exits)
+make service-uninstall
 ```
-
-After rebuilding, run `systemctl --user restart bb-review`. Logs: `journalctl --user -u bb-review -f`.
 
 ## Phone access with Tailscale
 
