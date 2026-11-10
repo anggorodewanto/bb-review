@@ -1316,6 +1316,21 @@ kbd {
     font-size: 12.5px;
 }
 
+.file-error {
+    border-color: var(--bad);
+}
+
+.file-error .file-block-head {
+    border-bottom: 1px solid var(--border);
+}
+
+.file-error-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 12px 12px;
+}
+
 .file-large {
     display: flex;
     flex-direction: column;

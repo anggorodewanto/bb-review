@@ -4,11 +4,13 @@ import type {FileEntry} from './diff';
 import type {Comment, Draft, User} from '../types';
 import {
     buildCommentNav,
+    excerptFromHtml,
     excerptOf,
     filterNavItems,
     findNavItem,
     navItemHash,
     parseCommentHash,
+    previewOf,
     shortPath,
 } from './commentNav';
 
@@ -160,6 +162,19 @@ describe('buildCommentNav ordering', () => {
         const comments = [comment({id: 1, deleted: true, inline: {path: 'src/a.ts', from: null, to: 2}})];
         expect(buildCommentNav(files(), comments, [], ME)).toHaveLength(0);
     });
+
+    it('previews the rendered HTML instead of raw markdown', () => {
+        const comments = [
+            comment({
+                id: 1,
+                raw: '## **CI Bot - Security Scan Passed**',
+                html: '<h2><strong>CI Bot - Security Scan Passed</strong></h2>',
+                inline: {path: 'src/a.ts', from: null, to: 2},
+            }),
+        ];
+        const items = buildCommentNav(files(), comments, [], ME);
+        expect(items[0]?.excerpt).toBe('CI Bot - Security Scan Passed');
+    });
 });
 
 describe('filterNavItems', () => {
@@ -214,5 +229,50 @@ describe('preview helpers', () => {
         expect(shortPath('')).toBe('General');
         expect(shortPath('src/a.ts')).toBe('src/a.ts');
         expect(shortPath('internal/server/handlers.go')).toBe('server/handlers.go');
+    });
+
+    it('turns a heading with bold text into a plain preview', () => {
+        const html = '<h2>✅ <strong>CI Bot - Security Scan Passed</strong></h2>';
+        const excerpt = excerptFromHtml(html);
+        expect(excerpt).toBe('✅ CI Bot - Security Scan Passed');
+        expect(excerpt).not.toContain('##');
+        expect(excerpt).not.toContain('**');
+    });
+
+    it('strips inline markup and keeps the link text', () => {
+        expect(
+            excerptFromHtml('<p>See <strong>this</strong> and <a href="https://example.com">a link</a>.</p>'),
+        ).toBe('See this and a link.');
+    });
+
+    it('flattens code blocks onto one line', () => {
+        expect(excerptFromHtml('<pre><code>line one\nline two</code></pre>')).toBe('line one line two');
+    });
+
+    it('reads table cells as plain text', () => {
+        const html = `<table>
+            <tbody>
+                <tr>
+                    <td>Build</td>
+                    <td>Passed</td>
+                </tr>
+            </tbody>
+        </table>`;
+        expect(excerptFromHtml(html)).toBe('Build Passed');
+    });
+
+    it('drops unsafe markup and decodes entities', () => {
+        expect(excerptFromHtml('<p>Tom &amp; Jerry</p><script>alert(1)</script>')).toBe('Tom & Jerry');
+    });
+
+    it('truncates long rendered comments', () => {
+        const excerpt = excerptFromHtml(`<p>${'word '.repeat(60)}</p>`);
+        expect(excerpt.length).toBeLessThanOrEqual(120);
+        expect(excerpt.endsWith('…')).toBe(true);
+    });
+
+    it('falls back to raw markdown when there is no rendered HTML', () => {
+        expect(previewOf({html: '', raw: 'plain **text** now'})).toBe('plain **text** now');
+        expect(previewOf({html: '<p>rendered</p>', raw: 'raw'})).toBe('rendered');
     });
 });

@@ -12,6 +12,7 @@ import type {ChangeData, HunkData, ViewType} from 'react-diff-view';
 import {refractor} from 'refractor/lib/common.js';
 import type {Comment, Draft} from '../types';
 import type {FileEntry} from '../lib/diff';
+import {lineContainsChangeKey} from '../lib/diff';
 import type {ViewedStatus} from '../lib/viewed';
 import {buildLineIndex, groupComments, groupDrafts} from '../lib/comments';
 import {languageForPath, plural} from '../lib/format';
@@ -319,12 +320,11 @@ function FileDiffInner({
 
     const generateLineClassName = useCallback(
         ({changes, defaultGenerate}: {changes: ChangeData[]; defaultGenerate: () => string}) => {
-            if (!focusedKey) {
+            // Split rows pair old/new changes; one side is null for pure inserts/deletes.
+            if (!lineContainsChangeKey(changes, focusedKey)) {
                 return defaultGenerate();
             }
-            // Split rows pair old/new changes; one side is null for pure inserts/deletes.
-            const matches = changes.some((change) => Boolean(change) && getChangeKey(change) === focusedKey);
-            return matches ? `${defaultGenerate()} bbr-line-focus` : defaultGenerate();
+            return `${defaultGenerate()} bbr-line-focus`;
         },
         [focusedKey],
     );

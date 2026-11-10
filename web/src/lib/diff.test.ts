@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {buildFileEntries, splitDiffChunks} from './diff';
+import {getChangeKey} from 'react-diff-view';
+import {buildFileEntries, lineContainsChangeKey, splitDiffChunks} from './diff';
 
 const DIFF = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644
@@ -78,5 +79,32 @@ describe('buildFileEntries', () => {
 
     it('returns an empty list for an empty diff', () => {
         expect(buildFileEntries('')).toEqual([]);
+    });
+});
+
+describe('lineContainsChangeKey', () => {
+    const entries = buildFileEntries(DIFF);
+    const hunk = entries[0]!.hunks[0]!;
+    const insert = hunk.changes.find((change) => change.type === 'insert')!;
+    const insertKey = getChangeKey(insert);
+
+    it('finds the focused change key', () => {
+        expect(lineContainsChangeKey([insert], insertKey)).toBe(true);
+        expect(lineContainsChangeKey([insert], 'N999')).toBe(false);
+    });
+
+    it('ignores null entries on split rows without throwing', () => {
+        expect(() => lineContainsChangeKey([null, insert], insertKey)).not.toThrow();
+        expect(lineContainsChangeKey([null, insert], insertKey)).toBe(true);
+        expect(lineContainsChangeKey([insert, null], insertKey)).toBe(true);
+        expect(lineContainsChangeKey([null, null], insertKey)).toBe(false);
+    });
+
+    it('handles a missing focus key or change list', () => {
+        expect(lineContainsChangeKey([insert], null)).toBe(false);
+        expect(lineContainsChangeKey([null], null)).toBe(false);
+        expect(lineContainsChangeKey(undefined, insertKey)).toBe(false);
+        expect(lineContainsChangeKey(null, insertKey)).toBe(false);
+        expect(lineContainsChangeKey([], insertKey)).toBe(false);
     });
 });

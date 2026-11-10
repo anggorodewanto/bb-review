@@ -2,6 +2,7 @@ import type {Comment, Draft, InlineAnchor, User} from '../types';
 import type {FileEntry} from './diff';
 import type {CommentThread} from './comments';
 import {buildLineIndex, groupComments, groupDrafts} from './comments';
+import {sanitizeHtml} from './sanitize';
 
 /** Where a navigable item lives in the PR. */
 export type NavKind = 'inline' | 'outdated' | 'general';
@@ -49,6 +50,29 @@ export function excerptOf(raw: string, limit = EXCERPT_LIMIT): string {
     return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
 
+/**
+ * Preview from Bitbucket's rendered comment HTML: sanitize it, read the text
+ * content, collapse whitespace and trim. Markdown headings/bold/links/code
+ * become plain words instead of literal `##` / `**` characters.
+ */
+export function excerptFromHtml(html: string, limit = EXCERPT_LIMIT): string {
+    const safe = sanitizeHtml(html);
+    if (!safe) {
+        return '';
+    }
+    if (typeof document === 'undefined') {
+        return '';
+    }
+    const container = document.createElement('div');
+    container.innerHTML = safe;
+    return excerptOf(container.textContent ?? '', limit);
+}
+
+/** Root comment preview: rendered HTML first, raw markdown as a fallback. */
+export function previewOf(comment: {html: string; raw: string}, limit = EXCERPT_LIMIT): string {
+    return excerptFromHtml(comment.html, limit) || excerptOf(comment.raw, limit);
+}
+
 /** Last two path segments are enough to identify a file in a narrow panel. */
 export function shortPath(path: string): string {
     if (path.length === 0) {
@@ -83,7 +107,7 @@ function commentItem(
         line: lineOf(root.inline),
         author: root.author,
         authorName: root.author.display_name,
-        excerpt: excerptOf(root.raw),
+        excerpt: previewOf(root),
         replyCount: thread.replies.length + replyDraftCount,
         draft: false,
         isMine: isMe(root.author, me),

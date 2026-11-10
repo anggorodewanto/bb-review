@@ -1,5 +1,5 @@
-import {parseDiff} from 'react-diff-view';
-import type {FileData, HunkData} from 'react-diff-view';
+import {parseDiff, getChangeKey} from 'react-diff-view';
+import type {ChangeData, FileData, HunkData} from 'react-diff-view';
 import type {DiffType} from 'react-diff-view';
 import {hashText} from './viewed';
 
@@ -77,6 +77,21 @@ function fallbackText(file: FileData): string {
     const header = `diff --git a/${file.oldPath} b/${file.newPath}\n`;
     const hunks = file.hunks.map((hunk) => hunk.content).join('\n');
     return `${header}${hunks}`;
+}
+
+/**
+ * True when a rendered line's change list contains the focused change key.
+ * Split rows pair old/new changes and hold `null` on the missing side for
+ * pure inserts/deletes, so the list must be treated as nullable at runtime.
+ */
+export function lineContainsChangeKey(
+    changes: ReadonlyArray<ChangeData | null | undefined> | null | undefined,
+    focusedKey: string | null,
+): boolean {
+    if (!focusedKey || !changes) {
+        return false;
+    }
+    return changes.some((change) => (change ? getChangeKey(change) === focusedKey : false));
 }
 
 export function buildFileEntries(rawDiff: string): FileEntry[] {

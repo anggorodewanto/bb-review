@@ -24,6 +24,7 @@ import {toggleViewed as toggleViewedMap, viewedStatus} from '../lib/viewed';
 import {ErrorState, Skeleton} from '../components/ui';
 import {FileTree} from '../components/FileTree';
 import {FileDiff} from '../components/FileDiff';
+import {FileDiffBoundary} from '../components/FileDiffBoundary';
 import {PRHeader} from '../components/PRHeader';
 import {ReviewBar} from '../components/ReviewBar';
 import type {SubmitAction} from '../components/ReviewBar';
@@ -889,28 +890,33 @@ export function PRView() {
                 ) : (
                     <div className="file-list">
                         {files.map((entry, index) => (
-                            <FileDiff
+                            <FileDiffBoundary
                                 key={`${entry.path}:${entry.hash}`}
-                                entry={entry}
-                                index={index}
-                                viewType={viewType}
-                                wrapLines={wrapLines}
-                                focusedKey={focus?.fileIndex === index ? focus.key : null}
-                                comments={comments}
-                                drafts={drafts}
-                                draftReplies={draftReplies}
-                                actions={threadActions}
-                                editorKey={editor?.fileIndex === index ? editor.key : null}
-                                onEditorSubmit={submitInlineEditor}
-                                onEditorCancel={cancelEditor}
-                                viewed={viewedStatus(viewedFiles, entry.path, entry.hash)}
-                                onToggleViewed={toggleFileViewed}
-                                onLineClick={onLineClick}
-                                onLoadSources={loadSources}
-                                onVisible={setCurrentIndex}
-                                registerRef={registerRef}
-                                reveal={reveal?.fileIndex === index ? reveal.nonce : null}
-                            />
+                                path={entry.path}
+                                url={pr.url}
+                            >
+                                <FileDiff
+                                    entry={entry}
+                                    index={index}
+                                    viewType={viewType}
+                                    wrapLines={wrapLines}
+                                    focusedKey={focus?.fileIndex === index ? focus.key : null}
+                                    comments={comments}
+                                    drafts={drafts}
+                                    draftReplies={draftReplies}
+                                    actions={threadActions}
+                                    editorKey={editor?.fileIndex === index ? editor.key : null}
+                                    onEditorSubmit={submitInlineEditor}
+                                    onEditorCancel={cancelEditor}
+                                    viewed={viewedStatus(viewedFiles, entry.path, entry.hash)}
+                                    onToggleViewed={toggleFileViewed}
+                                    onLineClick={onLineClick}
+                                    onLoadSources={loadSources}
+                                    onVisible={setCurrentIndex}
+                                    registerRef={registerRef}
+                                    reveal={reveal?.fileIndex === index ? reveal.nonce : null}
+                                />
+                            </FileDiffBoundary>
                         ))}
                     </div>
                 )}
