@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +13,9 @@ import (
 
 // handleMe returns the authenticated user.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	me, err := s.bb.Me(r.Context())
+	s.debugUpstream("me", start)
 	if err != nil {
 		s.writeUpstream(w, "me", err)
 		return
@@ -50,7 +51,9 @@ func (s *Server) handlePRList(w http.ResponseWriter, r *http.Request) {
 
 // writeAuthorPRList fetches the author list live.
 func (s *Server) writeAuthorPRList(w http.ResponseWriter, r *http.Request, state string) {
+	start := time.Now()
 	prs, err := s.bb.AuthorPRs(r.Context(), s.cfg.Workspace, state)
+	s.debugUpstream("pr list author", start)
 	if err != nil {
 		if bitbucket.IsRateLimited(err) {
 			w.Header().Set("X-BBR-Rate-Limited", "1")
@@ -91,7 +94,9 @@ func (s *Server) writeReviewerPRList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Build states come from the client cache; only misses cost a request, and
 	// none wait longer than the list budget.
+	start := time.Now()
 	s.bb.FillBuildStates(r.Context(), snapshot.PRs, bitbucket.DefaultBuildBudget)
+	s.debugUpstream("pr list reviewer build states", start)
 	writeJSON(w, http.StatusOK, snapshot.PRs)
 }
 
@@ -143,7 +148,9 @@ func (s *Server) handlePRDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	start := time.Now()
 	detail, err := s.bb.PRDetail(r.Context(), repo, id)
+	s.debugUpstream("pr detail", start, "repo", repo.String(), "id", id)
 	if err != nil {
 		s.writeUpstream(w, "pr detail", err)
 		return
@@ -151,26 +158,24 @@ func (s *Server) handlePRDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// handleDiff streams the unified diff as text/plain.
+// handleDiff returns the unified diff as text/plain, gzipped when asked for.
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	repo, id, ok := s.mustPR(w, r)
 	if !ok {
 		return
 	}
+	start := time.Now()
 	body, err := s.bb.Diff(r.Context(), repo, id)
+	s.debugUpstream("pr diff", start, "repo", repo.String(), "id", id)
 	if err != nil {
 		s.writeUpstream(w, "pr diff", err)
 		return
 	}
-	defer body.Close()
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", "inline")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(w, body); err != nil {
-		s.log.Debug("diff stream ended early", "repo", repo.String(), "id", id, "err", err.Error())
-	}
+	writeMaybeGzipped(w, r, body)
 }
 
 // mustPR resolves the path parameters or writes a 400.

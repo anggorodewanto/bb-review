@@ -259,6 +259,15 @@ func writeNotFound(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotFound, message)
 }
 
+// debugUpstream logs how long one handler's upstream work took. attrs are extra
+// key/value pairs (repo, id, ...) and must come in pairs.
+func (s *Server) debugUpstream(endpoint string, start time.Time, attrs ...any) {
+	args := make([]any, 0, 4+len(attrs))
+	args = append(args, "endpoint", endpoint, "duration_ms", time.Since(start).Milliseconds())
+	args = append(args, attrs...)
+	s.log.Debug("upstream latency", args...)
+}
+
 // decodeJSON decodes a JSON request body, rejecting oversized input.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))

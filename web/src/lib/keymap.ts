@@ -13,6 +13,7 @@ export type KeyAction =
     | 'submit'
     | 'toggle-tree'
     | 'toggle-split'
+    | 'toggle-wrap'
     | 'inbox'
     | 'help'
     | 'escape';
@@ -40,6 +41,7 @@ export const KEYMAP: KeyBinding[] = [
     {action: 'submit', keys: ['s'], label: 'Submit review', group: 'Review'},
     {action: 'toggle-tree', keys: ['t'], label: 'Toggle file tree', group: 'View'},
     {action: 'toggle-split', keys: ['u'], label: 'Toggle split / unified', group: 'View'},
+    {action: 'toggle-wrap', keys: ['w'], label: 'Toggle line wrapping', group: 'View'},
     {action: 'inbox', keys: ['g', 'i'], label: 'Go to inbox', group: 'Navigate'},
     {action: 'help', keys: ['?'], label: 'Show keyboard help', group: 'Help'},
     {action: 'escape', keys: ['Escape'], label: 'Close editor / overlay', group: 'Help'},

@@ -27,6 +27,8 @@ export type FileDiffProps = {
     entry: FileEntry;
     index: number;
     viewType: ViewType;
+    /** Wrap long lines (always on in split view; toggleable in unified). */
+    wrapLines: boolean;
     focusedKey: string | null;
     comments: Comment[];
     drafts: Draft[];
@@ -103,6 +105,7 @@ function FileDiffInner({
     entry,
     index,
     viewType,
+    wrapLines,
     focusedKey,
     comments,
     drafts,
@@ -361,6 +364,10 @@ function FileDiffInner({
         return rows;
     }
 
+    // Split view always wraps: both halves must stay visible. Unified view
+    // follows the "Wrap lines" preference.
+    const wrap = viewType === 'split' || wrapLines;
+
     const statusLabel =
         entry.type === 'add'
             ? 'Added'
@@ -436,6 +443,7 @@ function FileDiffInner({
                 <div className="diff-scroll">
                     <Diff
                         viewType={viewType}
+                        className={wrap ? 'diff-wrap' : 'diff-nowrap'}
                         diffType={entry.type}
                         hunks={hunks}
                         tokens={tokens}

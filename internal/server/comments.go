@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 )
@@ -13,7 +14,9 @@ func (s *Server) handleComments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	start := time.Now()
 	comments, err := s.bb.ListComments(r.Context(), repo, id)
+	s.debugUpstream("comments", start, "repo", repo.String(), "id", id)
 	if err != nil {
 		s.writeUpstream(w, "comments", err)
 		return
@@ -37,7 +40,9 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	if !validateComment(w, req) {
 		return
 	}
+	start := time.Now()
 	comment, err := s.bb.PostComment(r.Context(), repo, id, req.Raw, req.Inline, req.ParentID)
+	s.debugUpstream("post comment", start, "repo", repo.String(), "id", id)
 	if err != nil {
 		s.writeUpstream(w, "post comment", err)
 		return

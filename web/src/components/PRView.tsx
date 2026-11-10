@@ -121,6 +121,7 @@ export function PRView() {
         }
         return window.matchMedia('(min-width: 1100px)').matches ? 'split' : 'unified';
     });
+    const [wrapLines, setWrapLines] = useState<boolean>(() => readPref<boolean>('bb-review:wrap', true));
     const [currentIndex, setCurrentIndex] = useState(0);
     const [focus, setFocus] = useState<FocusState | null>(null);
     const [editor, setEditor] = useState<EditorState | null>(null);
@@ -394,6 +395,14 @@ export function PRView() {
         });
     }, []);
 
+    const toggleWrap = useCallback(() => {
+        setWrapLines((current) => {
+            const next = !current;
+            writePref('bb-review:wrap', next);
+            return next;
+        });
+    }, []);
+
     const goHunk = useCallback(
         (delta: 1 | -1) => {
             const list = filesRef.current;
@@ -501,6 +510,7 @@ export function PRView() {
             submit: () => setReviewOpen(true),
             'toggle-tree': toggleTree,
             'toggle-split': toggleView,
+            'toggle-wrap': toggleWrap,
             inbox: () => navigate('/'),
             help: () => setHelpOpen(true),
             escape: () => {
@@ -519,6 +529,7 @@ export function PRView() {
             toggleApprove,
             toggleTree,
             toggleView,
+            toggleWrap,
             navigate,
         ],
     );
@@ -626,6 +637,15 @@ export function PRView() {
                     <button type="button" className="btn btn-small" onClick={toggleView} title="Toggle split / unified (u)">
                         {viewType === 'split' ? 'Unified' : 'Split'}
                     </button>
+                    <button
+                        type="button"
+                        className="btn btn-small"
+                        onClick={toggleWrap}
+                        aria-pressed={wrapLines}
+                        title="Toggle line wrapping (w)"
+                    >
+                        Wrap lines
+                    </button>
                     <button type="button" className="btn btn-small" onClick={() => setHelpOpen(true)} title="Keyboard help (?)">
                         ?
                     </button>
@@ -670,6 +690,7 @@ export function PRView() {
                                 entry={entry}
                                 index={index}
                                 viewType={viewType}
+                                wrapLines={wrapLines}
                                 focusedKey={focus?.fileIndex === index ? focus.key : null}
                                 comments={comments}
                                 drafts={drafts}

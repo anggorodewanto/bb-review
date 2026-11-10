@@ -26,6 +26,16 @@ PR prefix: `/api/prs/{ws}/{repo}/{id}`.
 
 Non-2xx responses: `{"error": "human readable message", "status": <upstream status or 0>}`.
 
+## Transport
+
+- `GET {pr}/diff` and `GET /api/file/...` are served as `text/plain` and gzip-encoded when
+  the request sends `Accept-Encoding: gzip` and the body is larger than 1 KB. Such responses
+  carry `Content-Encoding: gzip` and `Vary: Accept-Encoding`; small bodies stay uncompressed.
+- PR detail, diff and comments are cached in-process for 30 s, so a repeated read inside that
+  window does not touch Bitbucket. Any write on the pull request (comment, draft submit,
+  approve, request changes) busts its cache; a cached diff is also dropped when the pull
+  request's `source_commit` changes, so a new push is never masked.
+
 ## Types
 
 ```ts
@@ -116,7 +126,7 @@ Pull request list responses carry four optional headers:
 | GET | `/api/stats` | | `Stats` — upstream request volume and scanner health. |
 | POST | `/api/scan` | | `{started: boolean}` — triggers an immediate reviewer scan tick in the background. Debounced: `started` is `false` when a tick is running or one started less than 10 s ago. |
 | GET | `{pr}` | | `PRDetail` |
-| GET | `{pr}/diff` | | `text/plain` unified git diff (Bitbucket `/diff`, redirects followed) |
+| GET | `{pr}/diff` | | `text/plain` unified git diff (Bitbucket `/diff`, redirects followed). gzip when the client accepts it and the body is > 1 KB. |
 | GET | `{pr}/comments` | | `Comment[]` (all pages, oldest first) |
 | POST | `{pr}/comments` | `{raw, inline?, parent_id?}` | `Comment` (posted immediately) |
 | GET | `{pr}/drafts` | | `Draft[]` |
@@ -130,7 +140,7 @@ Pull request list responses carry four optional headers:
 | DELETE | `{pr}/request-changes` | | `{my_state}` |
 | GET | `{pr}/viewed` | | `ViewedState` |
 | PUT | `{pr}/viewed` | `ViewedState` | `ViewedState` |
-| GET | `/api/file/{ws}/{repo}/{commit}/{path...}` | | `text/plain` raw file content at commit (for expanding diff context). `404` if missing. Files > 2 MB → `413`. |
+| GET | `/api/file/{ws}/{repo}/{commit}/{path...}` | | `text/plain` raw file content at commit (for expanding diff context). `404` if missing. Files > 2 MB → `413`. gzip when the client accepts it and the body is > 1 KB. |
 | GET | `/api/resolve?url=<bitbucket pr url>` | | `PRRef`. Accepts `https://bitbucket.org/{ws}/{repo}/pull-requests/{id}[/anything][?query][#frag]`; `400` for anything else. Pure parsing, no upstream call. |
 
 Anything not under `/api/` serves the embedded SPA (`index.html` fallback for client routes).
@@ -177,7 +187,9 @@ Anything not under `/api/` serves the embedded SPA (`index.html` fallback for cl
   `GET /2.0/workspaces/{ws}/pullrequests/{uuid}?state=OPEN&pagelen=50&fields=+values.participants`
   (the uuid is URL-encoded, braces included). Pagination followed.
 - Detail: `GET .../pullrequests/{id}`, `GET .../pullrequests/{id}/merge-base`,
-  `GET /2.0/repositories/{ws}/{repo}/commit/{source_commit}/statuses`.
+  `GET /2.0/repositories/{ws}/{repo}/commit/{source_commit}/statuses`. The three calls run
+  concurrently: merge-base starts with the PR fetch, statuses as soon as the source commit is
+  known.
 - Diff: `GET .../pullrequests/{id}/diff` (302 → follow).
 - Comments: `GET .../pullrequests/{id}/comments?pagelen=100` (follow `next`).
   Post: `POST .../comments` with `{"content":{"raw":...},"inline":{"path":...,"to":N}|{"path":...,"from":N},"parent":{"id":N}}`.

@@ -172,7 +172,7 @@ func prValues(repo string, count int, title string) []any {
 			"participants": []any{
 				map[string]any{"user": map[string]any{"uuid": "uuid-me"}, "role": "REVIEWER", "approved": true},
 			},
-			"source":      map[string]any{"commit": map[string]any{"hash": ""}},
+			"source":      map[string]any{"commit": map[string]any{"hash": fmt.Sprintf("c0ffee%s%d", repo, i+1)}},
 			"destination": map[string]any{"repository": map[string]any{"full_name": "ws/" + repo}},
 		})
 	}
@@ -960,4 +960,23 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestMissingCommit(t *testing.T) {
+	tests := []struct {
+		name string
+		prs  []bitbucket.PRSummary
+		want bool
+	}{
+		{"empty", nil, false},
+		{"all have commits", []bitbucket.PRSummary{{SourceCommit: "abc"}}, false},
+		{"one missing", []bitbucket.PRSummary{{SourceCommit: "abc"}, {}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := missingCommit(tt.prs); got != tt.want {
+				t.Fatalf("missingCommit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

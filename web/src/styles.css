@@ -1124,6 +1124,11 @@ kbd {
     min-height: var(--tap);
 }
 
+.pr-toolbar .btn[aria-pressed='true'] {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 .toolbar-spacer {
     flex: 1;
 }
@@ -1332,12 +1337,19 @@ kbd {
 
 /* --- diff overrides ----------------------------------------------------- */
 
+/* Fixed layout: a long line on one side can no longer widen the table, so in
+   split view the two halves stay 50/50 and the right side never scrolls away.
+   The gutter columns are pinned to ~5ch each; the code columns share the rest. */
 .diff {
-    width: max-content;
-    min-width: 100%;
-    table-layout: auto;
+    width: 100%;
+    max-width: 100%;
+    table-layout: fixed;
     font-size: 12.5px;
     background: var(--surface);
+}
+
+.diff-gutter-col {
+    width: 5ch;
 }
 
 .diff-line {
@@ -1346,19 +1358,36 @@ kbd {
 
 .diff-gutter {
     min-width: 5ch;
-    padding: 0 6px;
+    padding: 0 4px;
     color: var(--muted);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
     vertical-align: top;
 }
 
+/* Code wraps by default (split view always, unified view per the "Wrap lines"
+   preference). `anywhere` keeps long URLs/identifiers inside the cell. */
 .diff-code {
     padding: 0 10px 0 8px;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     word-break: normal;
-    overflow-wrap: normal;
     tab-size: 4;
+}
+
+/* Unified view with wrapping off: let the table size to the longest line and
+   scroll horizontally inside this file's own .diff-scroll container. */
+.diff-nowrap {
+    width: max-content;
+    max-width: none;
+    min-width: 100%;
+    table-layout: auto;
+}
+
+.diff-nowrap .diff-code {
+    white-space: pre;
+    overflow-wrap: normal;
+    word-break: normal;
 }
 
 .diff-code .diff-code-edit {

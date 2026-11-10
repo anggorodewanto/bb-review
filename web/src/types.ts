@@ -28,6 +28,7 @@ export type PRSummary = {
     my_state: ReviewState;
     approvals: number;
     build_state: BuildState;
+    source_commit: string;
     url: string;
 };
 
@@ -54,7 +55,6 @@ export type PRDetail = PRSummary & {
     description_raw: string;
     description_html: string;
     participants: Participant[];
-    source_commit: string;
     dest_commit: string;
     merge_base: string;
     builds: BuildStatus[];

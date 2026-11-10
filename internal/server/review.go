@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/anggorodewanto/bb-review/internal/bitbucket"
 )
@@ -22,6 +23,7 @@ func (s *Server) handleReviewAction(kind reviewActionKind, add bool) http.Handle
 			return
 		}
 		ctx := r.Context()
+		start := time.Now()
 
 		var err error
 		switch kind {
@@ -30,13 +32,16 @@ func (s *Server) handleReviewAction(kind reviewActionKind, add bool) http.Handle
 		case reviewRequestChanges:
 			err = s.bb.RequestChanges(ctx, repo, id, add)
 		}
+		s.debugUpstream("review action", start, "repo", repo.String(), "id", id)
 		if err != nil {
 			s.writeUpstream(w, "review action", err)
 			return
 		}
 		s.refreshRepoAfterWrite(ctx, repo)
 
+		detailStart := time.Now()
 		detail, err := s.bb.PRDetail(ctx, repo, id)
+		s.debugUpstream("review state", detailStart, "repo", repo.String(), "id", id)
 		if err != nil {
 			s.writeUpstream(w, "review state", err)
 			return

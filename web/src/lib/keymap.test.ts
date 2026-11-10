@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {resolveKey} from './keymap';
 import type {KeyInput} from './keymap';
+import {KEYMAP} from './keymap';
 
 function input(key: string, overrides: Partial<KeyInput> = {}): KeyInput {
     return {
@@ -32,6 +33,7 @@ describe('resolveKey', () => {
         expect(resolveKey(input('s'), null).action).toBe('submit');
         expect(resolveKey(input('t'), null).action).toBe('toggle-tree');
         expect(resolveKey(input('u'), null).action).toBe('toggle-split');
+        expect(resolveKey(input('w'), null).action).toBe('toggle-wrap');
         expect(resolveKey(input('?'), null).action).toBe('help');
         expect(resolveKey(input('Escape'), null).action).toBe('escape');
     });
@@ -75,5 +77,12 @@ describe('resolveKey', () => {
 
     it('treats j after an unrelated key normally', () => {
         expect(resolveKey(input('j'), null).action).toBe('next-file');
+    });
+
+    it('lists the wrap toggle in the help keymap', () => {
+        const binding = KEYMAP.find((entry) => entry.action === 'toggle-wrap');
+        expect(binding).toBeDefined();
+        expect(binding?.keys).toEqual(['w']);
+        expect(binding?.group).toBe('View');
     });
 });

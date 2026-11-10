@@ -29,6 +29,7 @@ const SUMMARY: PRSummary = {
     my_state: 'none',
     approvals: 0,
     build_state: 'SUCCESSFUL',
+    source_commit: 'abc123def456',
     url: 'https://bitbucket.org/ws/repo/pull-requests/1',
 };
 

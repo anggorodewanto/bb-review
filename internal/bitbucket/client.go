@@ -68,6 +68,8 @@ type Client struct {
 	requests *requestCounter
 	// buildCache caches aggregate build states per source commit.
 	buildCache *buildStateCache
+	// responses caches PR detail, diff and comments for a short while.
+	responses *responseCache
 }
 
 // listEntry is one cached PR list.
@@ -104,6 +106,7 @@ func New(opts Options) *Client {
 		statusCache: make(map[string]statusEntry),
 		requests:    newRequestCounter(now),
 		buildCache:  newBuildStateCache(now),
+		responses:   newResponseCache(now),
 	}
 }
 
@@ -279,33 +282,68 @@ func (c *Client) DiscoverActiveRepos(ctx context.Context, workspace string, acti
 }
 
 // PRDetail fetches a single pull request plus merge base and build statuses.
-// The build state it learns is cached for the list endpoints.
+// The pull request, its merge base and its commit statuses are fetched
+// concurrently (statuses once the source commit is known), the result is cached
+// for 30s, and the aggregate build state it learns feeds the list cache.
 func (c *Client) PRDetail(ctx context.Context, repo Repo, id int) (PRDetail, error) {
+	key := repo.PRKey(id)
+	if detail, ok := c.responses.detail(key); ok {
+		return detail, nil
+	}
 	me, err := c.Me(ctx)
 	if err != nil {
 		return PRDetail{}, err
 	}
+
+	// The merge base only needs ws/repo/id, so it runs alongside the PR fetch.
+	mergeCh := make(chan mergeBaseResult, 1)
+	go func() {
+		hash, err := c.mergeBase(ctx, repo, id)
+		mergeCh <- mergeBaseResult{hash: hash, err: err}
+	}()
+
 	var a apiPR
 	if err := c.getJSON(ctx, prPath(repo, id), &a); err != nil {
 		return PRDetail{}, err
 	}
 	detail := a.toDetail(repo, me.UUID)
 
-	if hash, err := c.mergeBase(ctx, repo, id); err == nil && hash != "" {
-		detail.MergeBase = hash
-	} else if err != nil {
-		c.log.Debug("merge base lookup failed", "repo", repo.String(), "id", id, "err", err.Error())
+	// Statuses need the source commit, so they start as soon as the PR is in.
+	buildsCh := make(chan buildsResult, 1)
+	go func() {
+		builds, err := c.commitStatuses(ctx, repo, detail.SourceCommit)
+		buildsCh <- buildsResult{builds: builds, err: err}
+	}()
+
+	merged := <-mergeCh
+	switch {
+	case merged.err != nil:
+		c.log.Debug("merge base lookup failed", "repo", repo.String(), "id", id, "err", merged.err.Error())
+	case merged.hash != "":
+		detail.MergeBase = merged.hash
 	}
 
-	builds, err := c.commitStatuses(ctx, repo, detail.SourceCommit)
-	if err != nil {
-		c.log.Warn("commit statuses failed", "repo", repo.String(), "commit", detail.SourceCommit, "err", err.Error())
+	builds := <-buildsCh
+	if builds.err != nil {
+		c.log.Warn("commit statuses failed", "repo", repo.String(), "commit", detail.SourceCommit, "err", builds.err.Error())
+		c.responses.storeDetail(key, detail)
 		return detail, nil
 	}
-	detail.Builds = builds
-	detail.BuildState = aggregateBuilds(builds)
+	detail.Builds = builds.builds
+	detail.BuildState = aggregateBuilds(builds.builds)
 	c.recordBuildState(repo, detail.SourceCommit, detail.BuildState)
+	c.responses.storeDetail(key, detail)
 	return detail, nil
+}
+
+type mergeBaseResult struct {
+	hash string
+	err  error
+}
+
+type buildsResult struct {
+	builds []BuildStatus
+	err    error
 }
 
 func (c *Client) mergeBase(ctx context.Context, repo Repo, id int) (string, error) {
@@ -344,8 +382,13 @@ func (c *Client) commitStatuses(ctx context.Context, repo Repo, hash string) ([]
 	return builds, nil
 }
 
-// ListComments returns every comment on a pull request, oldest first.
+// ListComments returns every comment on a pull request, oldest first. The list
+// is cached for 30s and busted by any write on the pull request.
 func (c *Client) ListComments(ctx context.Context, repo Repo, id int) ([]Comment, error) {
+	key := repo.PRKey(id)
+	if comments, ok := c.responses.comments(key); ok {
+		return comments, nil
+	}
 	values := url.Values{}
 	values.Set("pagelen", "100")
 	raw, err := getPaged[apiComment](ctx, c, prPath(repo, id)+"/comments?"+values.Encode())
@@ -362,6 +405,7 @@ func (c *Client) ListComments(ctx context.Context, repo Repo, id int) ([]Comment
 		}
 		return comments[i].ID < comments[j].ID
 	})
+	c.responses.storeComments(key, comments)
 	return comments, nil
 }
 
@@ -379,6 +423,7 @@ func (c *Client) PostComment(ctx context.Context, repo Repo, id int, raw string,
 		return Comment{}, err
 	}
 	c.InvalidateStatusCache()
+	c.responses.invalidate(repo.PRKey(id))
 	return out.toComment(), nil
 }
 
@@ -399,6 +444,7 @@ func (c *Client) reviewAction(ctx context.Context, repo Repo, id int, action str
 	}
 	err := c.sendJSON(ctx, method, prPath(repo, id)+"/"+action, nil, nil)
 	c.InvalidateStatusCache()
+	c.responses.invalidate(repo.PRKey(id))
 	if err == nil {
 		return nil
 	}
@@ -409,9 +455,25 @@ func (c *Client) reviewAction(ctx context.Context, repo Repo, id int, action str
 	return err
 }
 
-// Diff returns the unified diff stream for a pull request (redirects followed).
-func (c *Client) Diff(ctx context.Context, repo Repo, id int) (io.ReadCloser, error) {
-	return c.stream(ctx, prPath(repo, id)+"/diff", "text/plain")
+// Diff returns the unified diff of a pull request (redirects followed). The body
+// is cached for 30s and dropped when the pull request's source commit changes.
+func (c *Client) Diff(ctx context.Context, repo Repo, id int) ([]byte, error) {
+	key := repo.PRKey(id)
+	if body, ok := c.responses.diff(key); ok {
+		return body, nil
+	}
+	stream, err := c.stream(ctx, prPath(repo, id)+"/diff", "text/plain")
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	body, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, &APIError{Status: 0, Message: "read diff: " + err.Error()}
+	}
+	c.responses.storeDiff(key, body)
+	return body, nil
 }
 
 // File returns the raw file content at a commit.

@@ -414,7 +414,7 @@ func (s *Scanner) targetsLocked(active []bitbucket.ActiveRepo, activeKeys map[st
 		key := item.Repo.String()
 		stored, known := s.state.Repos[key]
 		changed := !known || stored.LastScannedUpdatedOn != updatedOnKey(item.UpdatedOn)
-		if changed || fullSweep {
+		if changed || fullSweep || missingCommit(stored.OpenReviewPRs) {
 			add(target{repo: item.Repo, updatedOn: item.UpdatedOn, inWindow: true})
 			continue
 		}
@@ -742,4 +742,15 @@ func newerFirst(a, b string) bool {
 	default:
 		return a > b
 	}
+}
+
+// missingCommit reports whether any stored PR predates the source_commit field.
+// Such repos are rescanned once so list rows can show build states.
+func missingCommit(prs []bitbucket.PRSummary) bool {
+	for _, pr := range prs {
+		if pr.SourceCommit == "" {
+			return true
+		}
+	}
+	return false
 }

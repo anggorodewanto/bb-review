@@ -40,11 +40,11 @@ const DETAIL: PRDetail = {
     my_state: 'none',
     approvals: 0,
     build_state: 'SUCCESSFUL',
+    source_commit: 'abc123def456',
     url: 'https://bitbucket.org/ws/repo/pull-requests/1',
     description_raw: 'desc',
     description_html: '<p onclick="evil()">Description <script>alert(1)</script></p>',
     participants: [{user: USER, role: 'REVIEWER', state: 'none'}],
-    source_commit: 'abc123def456',
     dest_commit: 'def456abc123',
     merge_base: '999888777666',
     builds: [],
@@ -75,6 +75,7 @@ function fakeResponse(body: unknown, contentType = 'application/json'): Response
 }
 
 beforeEach(() => {
+    window.localStorage.clear();
     vi.stubGlobal(
         'fetch',
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -144,8 +145,44 @@ describe('app smoke', () => {
         fireEvent.keyDown(window, {key: '?'});
         const dialog = await screen.findByRole('dialog', {name: 'Keyboard shortcuts'});
         expect(dialog).toBeInTheDocument();
+        expect(dialog).toHaveTextContent('Toggle line wrapping');
         fireEvent.keyDown(window, {key: 'Escape'});
         await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('wraps diff lines by default', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        const wrapToggle = await screen.findByRole('button', {name: 'Wrap lines'});
+        expect(wrapToggle).toHaveAttribute('aria-pressed', 'true');
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-wrap'));
+    });
+
+    it('toggles line wrapping with w and remembers it', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        const wrapToggle = await screen.findByRole('button', {name: 'Wrap lines'});
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-wrap'));
+
+        fireEvent.keyDown(window, {key: 'w'});
+
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-nowrap'));
+        expect(wrapToggle).toHaveAttribute('aria-pressed', 'false');
+        expect(window.localStorage.getItem('bb-review:wrap')).toBe('false');
+    });
+
+    it('restores a stored wrap preference and toggles it from the toolbar', async () => {
+        window.localStorage.setItem('bb-review:wrap', 'false');
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+        const wrapToggle = await screen.findByRole('button', {name: 'Wrap lines'});
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-nowrap'));
+        expect(wrapToggle).toHaveAttribute('aria-pressed', 'false');
+
+        fireEvent.click(wrapToggle);
+
+        await waitFor(() => expect(document.querySelector('.diff')).toHaveClass('diff-wrap'));
+        expect(window.localStorage.getItem('bb-review:wrap')).toBe('true');
     });
 
     it('filters the inbox list', async () => {
