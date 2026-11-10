@@ -1,4 +1,5 @@
 /** Scroll helpers shared by the inbox and the PR view. */
+import {smoothScrollTo} from './smoothScroll';
 
 export function prefersReducedMotion(): boolean {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -34,7 +35,7 @@ export function scrollPageToTop(root?: Element | null): void {
         container.scrollTo({top: 0, behavior});
         return;
     }
-    window.scrollTo({top: 0, behavior});
+    smoothScrollTo(0);
 }
 
 /** Show the back-to-top button after scrolling more than one viewport. */

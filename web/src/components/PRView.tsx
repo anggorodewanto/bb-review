@@ -10,7 +10,8 @@ import type {FileEntry} from '../lib/diff';
 import {anchorForChange, commentCounts, groupComments} from '../lib/comments';
 import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHash} from '../lib/commentNav';
 import type {NavItem} from '../lib/commentNav';
-import {prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
+import {scrollPageToTop} from '../lib/scroll';
+import {smoothScrollToElement} from '../lib/smoothScroll';
 import {fileIndexAtLine, nextNavTarget, prevFileTarget} from '../lib/fileNav';
 import {isMarkdownPath} from '../lib/markdown';
 import {
@@ -335,13 +336,9 @@ export function PRView() {
                 settleNavigation();
                 return;
             }
-            // Instant jump: keyboard navigation should feel immediate, and a
-            // smooth scroll races the scroll-spy (and is throttled in
-            // background windows).
-            if (typeof el.scrollIntoView === 'function') {
-                el.scrollIntoView({behavior: 'auto', block: 'start'});
-            }
-            settleNavigation();
+            // Quick editor-style glide (90-180ms). The scroll-spy stays locked
+            // until it lands; fast repeats retarget the running animation.
+            smoothScrollToElement(el, 'start', readingLine(), settleNavigation);
         },
         [beginNavigation, readingLine, settleNavigation],
     );
@@ -426,10 +423,7 @@ export function PRView() {
                 }
                 return;
             }
-            const behavior: ScrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
-            if (typeof el.scrollIntoView === 'function') {
-                el.scrollIntoView({behavior, block: 'center'});
-            }
+            smoothScrollToElement(el, 'center');
             el.classList.add('comment-flash');
             window.setTimeout(() => el.classList.remove('comment-flash'), 1000);
         };
@@ -804,10 +798,10 @@ export function PRView() {
                         hunkCursor.current = {fileIndex: index, hunk: next};
                         setCurrentIndex(index);
                         beginNavigation(index, false);
-                        hunks[next]?.scrollIntoView({
-                            behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-                            block: 'center',
-                        });
+                        const hunk = hunks[next];
+                        if (hunk) {
+                            smoothScrollToElement(hunk, 'center', 0, settleNavigation);
+                        }
                         return;
                     }
                 }
@@ -821,15 +815,15 @@ export function PRView() {
                     hunkCursor.current = {fileIndex: index, hunk: target};
                     setCurrentIndex(index);
                     beginNavigation(index, false);
-                    nextHunks[target]?.scrollIntoView({
-                        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-                        block: 'center',
-                    });
+                    const hunk = nextHunks[target];
+                    if (hunk) {
+                        smoothScrollToElement(hunk, 'center', 0, settleNavigation);
+                    }
                     return;
                 }
             }
         },
-        [beginNavigation],
+        [beginNavigation, settleNavigation],
     );
 
     const goLine = useCallback(
@@ -855,9 +849,11 @@ export function PRView() {
             setFocus({fileIndex: index, key: target.key, anchor: target.anchor});
             beginNavigation(index, false);
             const el = document.getElementById(`change-${index}-${target.key}`);
-            el?.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center'});
+            if (el) {
+                smoothScrollToElement(el, 'center', 0, settleNavigation);
+            }
         },
-        [beginNavigation],
+        [beginNavigation, settleNavigation],
     );
 
     const commentOnFocus = useCallback(() => {

@@ -58,9 +58,11 @@ export function MarkdownFile({entry, context}: {entry: FileEntry; context: Markd
         setExpandedGroups(new Set());
     }, [side, source]);
 
+    // A newly added file is entirely new: marking every block as changed is noise.
+    const added = entry.type === 'add';
     const changedLines = useMemo(
-        () => changedLineNumbers(entry.hunks, side),
-        [entry.hunks, side],
+        () => (added ? new Set<number>() : changedLineNumbers(entry.hunks, side)),
+        [added, entry.hunks, side],
     );
 
     const blocks = useMemo(() => {
@@ -192,14 +194,18 @@ export function MarkdownFile({entry, context}: {entry: FileEntry; context: Markd
                         </button>
                     </div>
                 ) : null}
-                <label className="md-changed-only">
-                    <input
-                        type="checkbox"
-                        checked={changedOnly}
-                        onChange={(event) => setChangedOnly(event.target.checked)}
-                    />
-                    Changed blocks only
-                </label>
+                {added ? (
+                    <span className="md-hint">New file</span>
+                ) : (
+                    <label className="md-changed-only">
+                        <input
+                            type="checkbox"
+                            checked={changedOnly}
+                            onChange={(event) => setChangedOnly(event.target.checked)}
+                        />
+                        Changed blocks only
+                    </label>
+                )}
                 <span className="md-hint">Comments are added in Diff view.</span>
             </div>
 
