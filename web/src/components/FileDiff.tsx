@@ -43,6 +43,8 @@ export type FileDiffProps = {
     onLoadSources: (entry: FileEntry) => Promise<{old: string; new: string} | null>;
     onVisible: (index: number) => void;
     registerRef: (index: number, el: HTMLElement | null) => void;
+    /** Bumped by a comment jump; forces this file to render and expand. */
+    reveal: number | null;
 };
 
 function changeId(index: number, change: ChangeData): string {
@@ -120,6 +122,7 @@ function FileDiffInner({
     onLoadSources,
     onVisible,
     registerRef,
+    reveal,
 }: FileDiffProps) {
     const sectionRef = useRef<HTMLElement | null>(null);
     const [active, setActive] = useState(false);
@@ -159,6 +162,16 @@ function FileDiffInner({
         observer.observe(el);
         return () => observer.disconnect();
     }, [active]);
+
+    // A comment jump can land in a file that has not been rendered (lazy
+    // IntersectionObserver) or is a collapsed large file. Reveal it eagerly.
+    useEffect(() => {
+        if (reveal == null) {
+            return;
+        }
+        setActive(true);
+        setLoadedLarge(true);
+    }, [reveal]);
 
     // Publish which file is currently in the reading band for tree highlighting.
     useEffect(() => {
@@ -222,6 +235,7 @@ function FileDiffInner({
                     key,
                     <CommentThread
                         key={`comment-${thread.root.id}`}
+                        id={`comment-${thread.root.id}`}
                         thread={thread}
                         replyDrafts={draftReplies.get(thread.root.id) ?? []}
                         actions={actions}
@@ -231,7 +245,15 @@ function FileDiffInner({
         }
         for (const [key, keyDrafts] of draftGroups.byKey) {
             for (const draft of keyDrafts) {
-                add(key, <DraftCard key={`draft-${draft.id}`} draft={draft} actions={actions} />);
+                add(
+                    key,
+                    <DraftCard
+                        key={`draft-${draft.id}`}
+                        id={`comment-draft-${draft.id}`}
+                        draft={draft}
+                        actions={actions}
+                    />,
+                );
             }
         }
         if (editorKey) {
@@ -468,13 +490,19 @@ function FileDiffInner({
                         {groups.outdated.map((thread) => (
                             <CommentThread
                                 key={`outdated-${thread.root.id}`}
+                                id={`comment-${thread.root.id}`}
                                 thread={thread}
                                 replyDrafts={draftReplies.get(thread.root.id) ?? []}
                                 actions={actions}
                             />
                         ))}
                         {draftGroups.unmapped.map((draft) => (
-                            <DraftCard key={`outdated-draft-${draft.id}`} draft={draft} actions={actions} />
+                            <DraftCard
+                                key={`outdated-draft-${draft.id}`}
+                                id={`comment-draft-${draft.id}`}
+                                draft={draft}
+                                actions={actions}
+                            />
                         ))}
                     </div>
                 </details>

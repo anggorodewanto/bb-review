@@ -5,7 +5,9 @@ import * as api from '../api';
 import type {PRSummary} from '../types';
 import {fuzzyMatch, relativeAge, relativeAgeLong, isoTitle} from '../lib/format';
 import {extractPRUrl} from '../lib/prUrl';
-import {isTypingTarget} from '../lib/keymap';
+import {isTypingTarget, resolveKey} from '../lib/keymap';
+import {isCodeScrollTarget, scrollPageToTop} from '../lib/scroll';
+import {BackToTop} from './BackToTop';
 import {Avatar, BuildDot, EmptyState, ErrorState, ReviewBadge, Skeleton, Spinner} from './ui';
 
 type Role = 'reviewer' | 'author';
@@ -22,6 +24,8 @@ export function Inbox() {
     const [inputError, setInputError] = useState<string | null>(null);
     const [now, setNow] = useState(() => Date.now());
     const urlInputRef = useRef<HTMLInputElement>(null);
+    const pageRef = useRef<HTMLDivElement>(null);
+    const pendingChord = useRef<string | null>(null);
     const navigate = useNavigate();
 
     const listQuery = useQuery({
@@ -105,6 +109,33 @@ export function Inbox() {
         return () => window.removeEventListener('keydown', onKeyDown);
     }, []);
 
+    // `g g` (and Home) scroll back to the top on small screens / long lists.
+    useEffect(() => {
+        function onKeyDown(event: KeyboardEvent) {
+            const result = resolveKey(
+                {
+                    key: event.key,
+                    ctrlKey: event.ctrlKey,
+                    metaKey: event.metaKey,
+                    altKey: event.altKey,
+                    target: event.target,
+                },
+                pendingChord.current,
+            );
+            pendingChord.current = result.pending;
+            if (result.action !== 'scroll-top') {
+                return;
+            }
+            if (event.key === 'Home' && isCodeScrollTarget(event.target)) {
+                return;
+            }
+            event.preventDefault();
+            scrollPageToTop(pageRef.current);
+        }
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, []);
+
     function openUrl(raw: string) {
         const prUrl = extractPRUrl(raw);
         if (!prUrl) {
@@ -153,7 +184,7 @@ export function Inbox() {
     const resolveError = inputError ?? (resolveMutation.isError ? messageOf(resolveMutation.error) : null);
 
     return (
-        <div className="page inbox">
+        <div className="page inbox" ref={pageRef}>
             <header className="topbar">
                 <span className="brand">bb-review</span>
                 <span className="topbar-spacer" />
@@ -301,6 +332,8 @@ export function Inbox() {
                     ))}
                 </ul>
             ) : null}
+
+            <BackToTop onClick={() => scrollPageToTop(pageRef.current)} />
         </div>
     );
 }

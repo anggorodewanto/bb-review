@@ -185,6 +185,31 @@ describe('app smoke', () => {
         expect(window.localStorage.getItem('bb-review:wrap')).toBe('true');
     });
 
+    it('opens the comments panel with C and lists the threads', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+
+        fireEvent.keyDown(window, {key: 'C'});
+
+        const panel = await screen.findByRole('complementary', {name: 'Comment threads'});
+        expect(panel).toHaveTextContent('Nice change');
+        expect(screen.getByRole('button', {name: 'All'})).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.getByRole('button', {name: "Others'"})).toBeInTheDocument();
+        expect(screen.getByRole('button', {name: 'Drafts'})).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', {name: 'Drafts'}));
+        expect(await screen.findByText('No comments match this filter.')).toBeInTheDocument();
+    });
+
+    it('shows a position indicator when cycling threads with ]', async () => {
+        renderAt('/pr/ws/repo/1');
+        await screen.findByText('Improve the diff viewer');
+
+        fireEvent.keyDown(window, {key: ']'});
+
+        expect(await screen.findByText('1/1')).toBeInTheDocument();
+    });
+
     it('filters the inbox list', async () => {
         renderAt('/');
         await screen.findByText('Improve the diff viewer');

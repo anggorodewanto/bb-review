@@ -8,6 +8,9 @@ import type {Comment, Draft, InlineAnchor, PRDetail, SubmitResult, ViewedState} 
 import {buildFileEntries} from '../lib/diff';
 import type {FileEntry} from '../lib/diff';
 import {anchorForChange, commentCounts, groupComments} from '../lib/comments';
+import {buildCommentNav, findNavItem, navItemDomId, navItemHash, parseCommentHash} from '../lib/commentNav';
+import type {NavItem} from '../lib/commentNav';
+import {isCodeScrollTarget, prefersReducedMotion, scrollPageToTop} from '../lib/scroll';
 import {resolveKey} from '../lib/keymap';
 import type {KeyAction} from '../lib/keymap';
 import {readPref, writePref} from '../lib/prefs';
@@ -22,6 +25,8 @@ import {ReviewBar} from '../components/ReviewBar';
 import type {SubmitAction} from '../components/ReviewBar';
 import {HelpOverlay} from '../components/HelpOverlay';
 import {GeneralComments} from '../components/GeneralComments';
+import {CommentsPanel} from '../components/CommentsPanel';
+import {BackToTop} from '../components/BackToTop';
 import type {ThreadActions} from '../components/CommentThread';
 
 const EMPTY_INDEX = {newLines: new Map<number, string>(), oldLines: new Map<number, string>()};
@@ -75,11 +80,18 @@ export function PRView() {
         queryFn: () => api.getViewed(ws, repo, prId),
         enabled: valid,
     });
+    const meQuery = useQuery({
+        queryKey: ['me'],
+        queryFn: api.getMe,
+        staleTime: Infinity,
+        retry: 1,
+    });
 
     const pr = prQuery.data;
     const comments = useMemo(() => commentsQuery.data ?? [], [commentsQuery.data]);
     const drafts = useMemo(() => draftsQuery.data ?? [], [draftsQuery.data]);
     const viewedFiles = viewedQuery.data?.files ?? {};
+    const me = meQuery.data ?? null;
 
     const files = useMemo(() => buildFileEntries(diffQuery.data ?? ''), [diffQuery.data]);
     const commentCountByPath = useMemo(() => commentCounts(comments), [comments]);
@@ -106,6 +118,10 @@ export function PRView() {
         }
         return map;
     }, [drafts]);
+    const navItems = useMemo(
+        () => buildCommentNav(files, comments, drafts, me),
+        [files, comments, drafts, me],
+    );
 
     // --- layout state -------------------------------------------------------
     const isMobile = useMediaQuery('(max-width: 1099px)');
@@ -130,6 +146,10 @@ export function PRView() {
     const [helpOpen, setHelpOpen] = useState(false);
     const [reviewOpen, setReviewOpen] = useState(false);
     const [failures, setFailures] = useState<SubmitResult['failed']>([]);
+    const [commentsOpen, setCommentsOpen] = useState(false);
+    const [activeNavId, setActiveNavId] = useState<string | null>(null);
+    const [reveal, setReveal] = useState<{fileIndex: number; nonce: number} | null>(null);
+    const [navToast, setNavToast] = useState<{text: string; nonce: number} | null>(null);
 
     const viewType: ViewType = forceUnified ? 'unified' : viewPref;
 
@@ -147,6 +167,12 @@ export function PRView() {
     const fileRefs = useRef<Array<HTMLElement | null>>([]);
     const hunkCursor = useRef<{fileIndex: number; hunk: number}>({fileIndex: -1, hunk: -1});
     const pendingChord = useRef<string | null>(null);
+    const pageRef = useRef<HTMLDivElement | null>(null);
+    const navItemsRef = useRef<NavItem[]>(navItems);
+    navItemsRef.current = navItems;
+    const revealNonce = useRef(0);
+    const navCursor = useRef(-1);
+    const deepLinkDone = useRef(false);
 
     // Reset per-PR view state only when the PR itself changes (a background
     // refetch of the same PR must not yank the reader back to the first file).
@@ -154,6 +180,11 @@ export function PRView() {
         setCurrentIndex(0);
         setFocus(null);
         setEditor(null);
+        setCommentsOpen(false);
+        setActiveNavId(null);
+        setReveal(null);
+        navCursor.current = -1;
+        deepLinkDone.current = false;
         hunkCursor.current = {fileIndex: -1, hunk: -1};
         window.scrollTo(0, 0);
     }, [prId]);
@@ -176,6 +207,114 @@ export function PRView() {
             return;
         }
         el.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }, []);
+
+    // Wait for the thread to exist (lazy/expanded files render a frame later),
+    // open any closed outdated section, then center and flash it.
+    const scrollToNavItem = useCallback((item: NavItem) => {
+        let frames = 0;
+        const tick = () => {
+            const el = document.getElementById(navItemDomId(item));
+            if (!el) {
+                frames += 1;
+                if (frames <= 240) {
+                    window.requestAnimationFrame(tick);
+                }
+                return;
+            }
+            const details = el.closest('details');
+            if (details && !details.open) {
+                details.open = true;
+                frames += 1;
+                if (frames <= 240) {
+                    window.requestAnimationFrame(tick);
+                }
+                return;
+            }
+            const behavior: ScrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
+            if (typeof el.scrollIntoView === 'function') {
+                el.scrollIntoView({behavior, block: 'center'});
+            }
+            el.classList.add('comment-flash');
+            window.setTimeout(() => el.classList.remove('comment-flash'), 1000);
+        };
+        window.requestAnimationFrame(tick);
+    }, []);
+
+    const jumpToItem = useCallback(
+        (item: NavItem) => {
+            setActiveNavId(item.id);
+            const nextHash = navItemHash(item);
+            if (window.location.hash !== nextHash) {
+                window.history.replaceState(
+                    window.history.state,
+                    '',
+                    `${window.location.pathname}${window.location.search}${nextHash}`,
+                );
+            }
+            if (item.fileIndex < 0) {
+                scrollToNavItem(item);
+                return;
+            }
+            setCurrentIndex(item.fileIndex);
+            setReveal({fileIndex: item.fileIndex, nonce: (revealNonce.current += 1)});
+            if (item.changeKey && item.anchor) {
+                setFocus({fileIndex: item.fileIndex, key: item.changeKey, anchor: item.anchor});
+            }
+            scrollToNavItem(item);
+        },
+        [scrollToNavItem],
+    );
+
+    const goComment = useCallback(
+        (delta: 1 | -1) => {
+            const items = navItemsRef.current;
+            if (items.length === 0) {
+                return;
+            }
+            const next = (navCursor.current + delta + items.length) % items.length;
+            const item = items[next];
+            if (!item) {
+                return;
+            }
+            navCursor.current = next;
+            jumpToItem(item);
+            setNavToast({text: `${next + 1}/${items.length}`, nonce: Date.now()});
+        },
+        [jumpToItem],
+    );
+
+    const selectNavItem = useCallback(
+        (item: NavItem) => {
+            const index = navItemsRef.current.findIndex((entry) => entry.id === item.id);
+            if (index >= 0) {
+                navCursor.current = index;
+            }
+            jumpToItem(item);
+            if (isMobile) {
+                setCommentsOpen(false);
+            }
+        },
+        [jumpToItem, isMobile],
+    );
+
+    const jumpToFileComment = useCallback(
+        (path: string) => {
+            const item = navItemsRef.current.find((entry) => entry.path === path);
+            if (!item) {
+                return;
+            }
+            selectNavItem(item);
+        },
+        [selectNavItem],
+    );
+
+    const goTop = useCallback(() => {
+        scrollPageToTop(pageRef.current);
+        setCurrentIndex(0);
+        const first = filesRef.current[0];
+        const change = first ? flattenChanges(first.hunks, first.path)[0] : undefined;
+        setFocus(change ? {fileIndex: 0, key: change.key, anchor: change.anchor} : null);
     }, []);
 
     // --- mutations ----------------------------------------------------------
@@ -504,6 +643,10 @@ export function PRView() {
             'prev-hunk': () => goHunk(-1),
             'next-line': () => goLine(1),
             'prev-line': () => goLine(-1),
+            'next-comment': () => goComment(1),
+            'prev-comment': () => goComment(-1),
+            'toggle-comments': () => setCommentsOpen((open) => !open),
+            'scroll-top': goTop,
             comment: commentOnFocus,
             'toggle-viewed': toggleViewedAndAdvance,
             approve: toggleApprove,
@@ -518,12 +661,15 @@ export function PRView() {
                 setReviewOpen(false);
                 setTreeOpen(false);
                 setHelpOpen(false);
+                setCommentsOpen(false);
             },
         }),
         [
             scrollToFile,
             goHunk,
             goLine,
+            goComment,
+            goTop,
             commentOnFocus,
             toggleViewedAndAdvance,
             toggleApprove,
@@ -535,6 +681,41 @@ export function PRView() {
     );
     const actionsRef = useRef(actions);
     actionsRef.current = actions;
+
+    useEffect(() => {
+        if (!navToast) {
+            return;
+        }
+        const timer = window.setTimeout(() => setNavToast(null), 1400);
+        return () => window.clearTimeout(timer);
+    }, [navToast]);
+
+    // Bitbucket links use #comment-<id>; jump once the comments have loaded.
+    useEffect(() => {
+        if (deepLinkDone.current) {
+            return;
+        }
+        const hash = window.location.hash;
+        if (!hash) {
+            deepLinkDone.current = true;
+            return;
+        }
+        const parsed = parseCommentHash(hash);
+        if (!parsed) {
+            deepLinkDone.current = true;
+            return;
+        }
+        const item = findNavItem(navItems, parsed);
+        if (!item) {
+            return;
+        }
+        deepLinkDone.current = true;
+        const index = navItems.indexOf(item);
+        if (index >= 0) {
+            navCursor.current = index;
+        }
+        jumpToItem(item);
+    }, [navItems, jumpToItem]);
 
     useEffect(() => {
         function onKeyDown(event: KeyboardEvent) {
@@ -550,6 +731,9 @@ export function PRView() {
             );
             pendingChord.current = result.pending;
             if (!result.action) {
+                return;
+            }
+            if (result.action === 'scroll-top' && event.key === 'Home' && isCodeScrollTarget(event.target)) {
                 return;
             }
             const handler = actionsRef.current[result.action];
@@ -599,7 +783,10 @@ export function PRView() {
     const diffError = diffQuery.isError ? messageOf(diffQuery.error) : null;
 
     return (
-        <div className={`pr-page${treeVisible ? '' : ' no-tree'}`}>
+        <div
+            ref={pageRef}
+            className={`pr-page${treeVisible ? '' : ' no-tree'}${commentsOpen ? ' with-comments' : ''}`}
+        >
             {treeOpen ? <div className="drawer-backdrop" onClick={() => setTreeOpen(false)} /> : null}
 
             <div className={`tree-slot${treeOpen ? ' is-open' : ''}`}>
@@ -613,6 +800,10 @@ export function PRView() {
                         setTreeOpen(false);
                     }}
                     onToggleViewed={toggleFileViewed}
+                    onJumpToComment={(path) => {
+                        jumpToFileComment(path);
+                        setTreeOpen(false);
+                    }}
                     onClose={isMobile ? () => setTreeOpen(false) : undefined}
                 />
                 {treeOpen ? (
@@ -628,6 +819,8 @@ export function PRView() {
                     busy={busyReview}
                     onApprove={toggleApprove}
                     onRequestChanges={toggleRequestChanges}
+                    commentTotal={navItems.length}
+                    onOpenComments={() => setCommentsOpen((open) => !open)}
                 />
 
                 <div className="pr-toolbar">
@@ -705,6 +898,7 @@ export function PRView() {
                                 onLoadSources={loadSources}
                                 onVisible={setCurrentIndex}
                                 registerRef={registerRef}
+                                reveal={reveal?.fileIndex === index ? reveal.nonce : null}
                             />
                         ))}
                     </div>
@@ -732,6 +926,36 @@ export function PRView() {
                     </button>
                 </p>
             </main>
+
+            {commentsOpen ? (
+                <CommentsPanel
+                    items={navItems}
+                    activeId={activeNavId}
+                    onSelect={selectNavItem}
+                    onClose={() => setCommentsOpen(false)}
+                />
+            ) : null}
+
+            <div className="float-actions">
+                <BackToTop onClick={goTop} scrollRoot={pageRef} />
+                {isMobile && navItems.length > 0 ? (
+                    <button
+                        type="button"
+                        className="float-btn float-next-comment"
+                        onClick={() => goComment(1)}
+                        title="Next comment (])"
+                        aria-label="Next comment"
+                    >
+                        💬↓
+                    </button>
+                ) : null}
+            </div>
+
+            {navToast ? (
+                <div className="comment-nav-toast" role="status" aria-live="polite">
+                    {navToast.text}
+                </div>
+            ) : null}
 
             <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
         </div>

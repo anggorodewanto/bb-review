@@ -34,8 +34,15 @@ describe('resolveKey', () => {
         expect(resolveKey(input('t'), null).action).toBe('toggle-tree');
         expect(resolveKey(input('u'), null).action).toBe('toggle-split');
         expect(resolveKey(input('w'), null).action).toBe('toggle-wrap');
+        expect(resolveKey(input('C'), null).action).toBe('toggle-comments');
         expect(resolveKey(input('?'), null).action).toBe('help');
         expect(resolveKey(input('Escape'), null).action).toBe('escape');
+    });
+
+    it('maps comment navigation and top keys', () => {
+        expect(resolveKey(input(']'), null).action).toBe('next-comment');
+        expect(resolveKey(input('['), null).action).toBe('prev-comment');
+        expect(resolveKey(input('Home'), null).action).toBe('scroll-top');
     });
 
     it('ignores keys typed into inputs and textareas', () => {
@@ -68,6 +75,12 @@ describe('resolveKey', () => {
         expect(resolveKey(input('i'), first.pending).action).toBe('inbox');
     });
 
+    it('resolves the g g chord to the top of the page', () => {
+        const first = resolveKey(input('g'), null);
+        expect(first.pending).toBe('g');
+        expect(resolveKey(input('g'), first.pending).action).toBe('scroll-top');
+    });
+
     it('clears an unknown chord instead of firing the second key', () => {
         const first = resolveKey(input('g'), null);
         const second = resolveKey(input('x'), first.pending);
@@ -84,5 +97,16 @@ describe('resolveKey', () => {
         expect(binding).toBeDefined();
         expect(binding?.keys).toEqual(['w']);
         expect(binding?.group).toBe('View');
+    });
+
+    it('lists the comment and top bindings in the help keymap', () => {
+        const next = KEYMAP.find((entry) => entry.action === 'next-comment');
+        expect(next?.keys).toEqual([']']);
+        const prev = KEYMAP.find((entry) => entry.action === 'prev-comment');
+        expect(prev?.keys).toEqual(['[']);
+        const toggle = KEYMAP.find((entry) => entry.action === 'toggle-comments');
+        expect(toggle?.keys).toEqual(['C']);
+        const chords = KEYMAP.filter((entry) => entry.action === 'scroll-top');
+        expect(chords.some((entry) => entry.keys.join('') === 'gg')).toBe(true);
     });
 });

@@ -16,9 +16,19 @@ export type PRHeaderProps = {
     busy: boolean;
     onApprove: () => void;
     onRequestChanges: () => void;
+    /** Total navigable comment threads (falls back to the PR comment count). */
+    commentTotal?: number;
+    onOpenComments?: () => void;
 };
 
-export function PRHeader({pr, busy, onApprove, onRequestChanges}: PRHeaderProps) {
+export function PRHeader({
+    pr,
+    busy,
+    onApprove,
+    onRequestChanges,
+    commentTotal,
+    onOpenComments,
+}: PRHeaderProps) {
     const description = useMemo(() => sanitizeHtml(pr.description_html), [pr.description_html]);
     const approved = pr.my_state === 'approved';
     const changes = pr.my_state === 'changes_requested';
@@ -46,7 +56,18 @@ export function PRHeader({pr, busy, onApprove, onRequestChanges}: PRHeaderProps)
                 <span className="sep">·</span>
                 <span title={isoTitle(pr.created_on)}>opened {relativeAge(pr.created_on)}</span>
                 <span className="sep">·</span>
-                <span>{plural(pr.comment_count, 'comment')}</span>
+                {onOpenComments ? (
+                    <button
+                        type="button"
+                        className="btn btn-small btn-ghost pr-comments-btn"
+                        onClick={onOpenComments}
+                        title="Comment threads (C)"
+                    >
+                        💬 {commentTotal ?? pr.comment_count}
+                    </button>
+                ) : (
+                    <span>{plural(pr.comment_count, 'comment')}</span>
+                )}
                 {pr.task_count > 0 ? (
                     <>
                         <span className="sep">·</span>

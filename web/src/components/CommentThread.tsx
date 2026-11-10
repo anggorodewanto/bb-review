@@ -47,7 +47,15 @@ function CommentCard({comment}: {comment: Comment}) {
     );
 }
 
-export function DraftCard({draft, actions}: {draft: Draft; actions: DraftActions}) {
+export function DraftCard({
+    draft,
+    actions,
+    id,
+}: {
+    draft: Draft;
+    actions: DraftActions;
+    id?: string;
+}) {
     const [editing, setEditing] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -91,7 +99,7 @@ export function DraftCard({draft, actions}: {draft: Draft; actions: DraftActions
     }
 
     return (
-        <article className="comment comment-draft">
+        <article className="comment comment-draft" id={id}>
             <div className="comment-head">
                 <span className="badge badge-draft">Draft</span>
                 <span className="comment-hint">only visible to you</span>
@@ -114,10 +122,12 @@ export function CommentThread({
     thread,
     replyDrafts,
     actions,
+    id,
 }: {
     thread: Thread;
     replyDrafts: Draft[];
     actions: ThreadActions;
+    id?: string;
 }) {
     const [replying, setReplying] = useState(false);
 
@@ -127,7 +137,7 @@ export function CommentThread({
     }
 
     return (
-        <div className="thread">
+        <div className="thread" id={id}>
             <CommentCard comment={thread.root} />
             {thread.replies.length > 0 || replyDrafts.length > 0 ? (
                 <div className="thread-replies">

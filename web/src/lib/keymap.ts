@@ -14,6 +14,10 @@ export type KeyAction =
     | 'toggle-tree'
     | 'toggle-split'
     | 'toggle-wrap'
+    | 'next-comment'
+    | 'prev-comment'
+    | 'toggle-comments'
+    | 'scroll-top'
     | 'inbox'
     | 'help'
     | 'escape';
@@ -35,6 +39,10 @@ export const KEYMAP: KeyBinding[] = [
     {action: 'prev-line', keys: ['ArrowUp'], label: 'Previous line', group: 'Navigate'},
     {action: 'next-line', keys: ['J'], label: 'Next line', group: 'Navigate'},
     {action: 'prev-line', keys: ['K'], label: 'Previous line', group: 'Navigate'},
+    {action: 'next-comment', keys: [']'], label: 'Next comment thread', group: 'Navigate'},
+    {action: 'prev-comment', keys: ['['], label: 'Previous comment thread', group: 'Navigate'},
+    {action: 'scroll-top', keys: ['g', 'g'], label: 'Go to top of page', group: 'Navigate'},
+    {action: 'scroll-top', keys: ['Home'], label: 'Go to top of page', group: 'Navigate'},
     {action: 'comment', keys: ['c'], label: 'Comment on focused line', group: 'Review'},
     {action: 'toggle-viewed', keys: ['v'], label: 'Toggle viewed, jump to next unviewed', group: 'Review'},
     {action: 'approve', keys: ['a'], label: 'Toggle approve', group: 'Review'},
@@ -42,6 +50,7 @@ export const KEYMAP: KeyBinding[] = [
     {action: 'toggle-tree', keys: ['t'], label: 'Toggle file tree', group: 'View'},
     {action: 'toggle-split', keys: ['u'], label: 'Toggle split / unified', group: 'View'},
     {action: 'toggle-wrap', keys: ['w'], label: 'Toggle line wrapping', group: 'View'},
+    {action: 'toggle-comments', keys: ['C'], label: 'Toggle comments panel', group: 'View'},
     {action: 'inbox', keys: ['g', 'i'], label: 'Go to inbox', group: 'Navigate'},
     {action: 'help', keys: ['?'], label: 'Show keyboard help', group: 'Help'},
     {action: 'escape', keys: ['Escape'], label: 'Close editor / overlay', group: 'Help'},

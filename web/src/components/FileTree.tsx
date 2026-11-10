@@ -65,6 +65,8 @@ export type FileTreeProps = {
     viewedFiles: Record<string, string>;
     onSelect: (index: number) => void;
     onToggleViewed: (entry: FileEntry) => void;
+    /** Jump to the first thread in a file (clicking its comment count). */
+    onJumpToComment?: (path: string) => void;
     onClose?: () => void;
 };
 
@@ -75,6 +77,7 @@ export function FileTree({
     viewedFiles,
     onSelect,
     onToggleViewed,
+    onJumpToComment,
     onClose,
 }: FileTreeProps) {
     const tree = useMemo(() => buildTree(files), [files]);
@@ -141,7 +144,21 @@ export function FileTree({
                             className={`tree-file${index === currentIndex ? ' is-current' : ''} viewed-${status}`}
                             style={{paddingLeft: `${depth * 12 + 24}px`}}
                         >
-                            <button type="button" className="tree-file-row" onClick={() => onSelect(index)}>
+                            <button
+                                type="button"
+                                className="tree-file-row"
+                                onClick={(event) => {
+                                    const onCount =
+                                        commentCount > 0 &&
+                                        event.target instanceof HTMLElement &&
+                                        event.target.closest('.tree-comments') !== null;
+                                    if (onCount && onJumpToComment) {
+                                        onJumpToComment(entry.path);
+                                        return;
+                                    }
+                                    onSelect(index);
+                                }}
+                            >
                                 <span className="tree-name" title={entry.path}>
                                     {name}
                                 </span>
@@ -151,7 +168,10 @@ export function FileTree({
                                     </span>
                                 ) : null}
                                 {commentCount > 0 ? (
-                                    <span className="tree-comments" title={plural(commentCount, 'comment')}>
+                                    <span
+                                        className="tree-comments"
+                                        title={`Jump to the first of ${plural(commentCount, 'comment')}`}
+                                    >
                                         {commentCount}
                                     </span>
                                 ) : null}

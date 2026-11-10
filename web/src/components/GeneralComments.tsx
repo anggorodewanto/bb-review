@@ -34,6 +34,7 @@ export function GeneralComments({
             {threads.map((thread) => (
                 <CommentThread
                     key={`general-${thread.root.id}`}
+                    id={`comment-${thread.root.id}`}
                     thread={thread}
                     replyDrafts={draftReplies.get(thread.root.id) ?? []}
                     actions={actions}
@@ -41,7 +42,12 @@ export function GeneralComments({
             ))}
 
             {drafts.map((draft) => (
-                <DraftCard key={`general-draft-${draft.id}`} draft={draft} actions={actions} />
+                <DraftCard
+                    key={`general-draft-${draft.id}`}
+                    id={`comment-draft-${draft.id}`}
+                    draft={draft}
+                    actions={actions}
+                />
             ))}
 
             {editing ? (
