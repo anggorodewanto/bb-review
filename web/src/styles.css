@@ -2249,3 +2249,10 @@ kbd {
         scroll-behavior: auto !important;
     }
 }
+
+/* Render-error fallback (ErrorBoundary) */
+.bbr-crash { max-width: 640px; margin: 15vh auto; padding: 0 16px; }
+.bbr-crash h1 { font-size: 1.2rem; margin-bottom: 12px; }
+.bbr-crash pre { white-space: pre-wrap; overflow-wrap: anywhere; opacity: 0.8; }
+.bbr-crash-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+.bbr-crash-actions button, .bbr-crash-actions a { min-height: 40px; padding: 0 14px; }

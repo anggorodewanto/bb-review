@@ -322,7 +322,8 @@ function FileDiffInner({
             if (!focusedKey) {
                 return defaultGenerate();
             }
-            const matches = changes.some((change) => getChangeKey(change) === focusedKey);
+            // Split rows pair old/new changes; one side is null for pure inserts/deletes.
+            const matches = changes.some((change) => Boolean(change) && getChangeKey(change) === focusedKey);
             return matches ? `${defaultGenerate()} bbr-line-focus` : defaultGenerate();
         },
         [focusedKey],

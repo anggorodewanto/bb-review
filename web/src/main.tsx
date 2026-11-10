@@ -5,6 +5,7 @@ import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import 'react-diff-view/style/index.css';
 import './styles.css';
 import {App} from './App';
+import {ErrorBoundary} from './components/ErrorBoundary';
 
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -25,7 +26,9 @@ createRoot(container).render(
     <StrictMode>
         <QueryClientProvider client={queryClient}>
             <BrowserRouter future={{v7_startTransition: true, v7_relativeSplatPath: true}}>
-                <App />
+                <ErrorBoundary>
+                    <App />
+                </ErrorBoundary>
             </BrowserRouter>
         </QueryClientProvider>
     </StrictMode>,
