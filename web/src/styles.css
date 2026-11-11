@@ -886,13 +886,22 @@ kbd {
     padding-right: 0;
 }
 
+.tree-file.viewed-viewed .tree-name {
+    color: var(--muted);
+}
+
 .tree-file.is-current {
-    background: var(--surface-2);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
     box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.tree-file.viewed-viewed .tree-name {
-    color: var(--muted);
+.tree-file.is-current .tree-name {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.tree-file.is-current .tree-file-row:hover {
+    background: transparent;
 }
 
 .tree-counts {

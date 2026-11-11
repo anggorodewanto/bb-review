@@ -1,4 +1,4 @@
-import {useMemo, useState} from 'react';
+import {useLayoutEffect, useMemo, useRef, useState} from 'react';
 import type {FileEntry} from '../lib/diff';
 import {isNoisePath} from '../lib/diff';
 import {viewedStatus} from '../lib/viewed';
@@ -63,6 +63,8 @@ export type FileTreeProps = {
     currentIndex: number;
     comments: Record<string, number>;
     viewedFiles: Record<string, string>;
+    /** The sidebar is on screen, so the focused file should be revealed. */
+    visible: boolean;
     onSelect: (index: number) => void;
     onToggleViewed: (entry: FileEntry) => void;
     /** Jump to the first thread in a file (clicking its comment count). */
@@ -70,11 +72,37 @@ export type FileTreeProps = {
     onClose?: () => void;
 };
 
+/** Ancestor folder keys (`a`, `a/b`) of a file path. */
+function ancestorDirs(path: string): string[] {
+    const parts = path.split('/').slice(0, -1);
+    const keys: string[] = [];
+    let prefix = '';
+    for (const part of parts) {
+        prefix = prefix ? `${prefix}/${part}` : part;
+        keys.push(prefix);
+    }
+    return keys;
+}
+
+/** Returns the same Set when no ancestor folder of `path` is collapsed. */
+function expandAncestorDirs(collapsed: Set<string>, path: string): Set<string> {
+    const required = ancestorDirs(path);
+    if (!required.some((key) => collapsed.has(key))) {
+        return collapsed;
+    }
+    const next = new Set(collapsed);
+    for (const key of required) {
+        next.delete(key);
+    }
+    return next;
+}
+
 export function FileTree({
     files,
     currentIndex,
     comments,
     viewedFiles,
+    visible,
     onSelect,
     onToggleViewed,
     onJumpToComment,
@@ -86,6 +114,36 @@ export function FileTree({
         collectNoiseDirs(tree, '', noise);
         return noise;
     });
+    const revealPath = visible ? (files[currentIndex]?.path ?? null) : null;
+    const [revealedPath, setRevealedPath] = useState<string | null>(null);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+
+    if (revealPath !== revealedPath) {
+        setRevealedPath(revealPath);
+        if (revealPath !== null) {
+            setCollapsed((prev) => expandAncestorDirs(prev, revealPath));
+        }
+    }
+
+    useLayoutEffect(() => {
+        if (revealPath === null) {
+            return;
+        }
+        const container = scrollRef.current;
+        const row = container?.querySelector<HTMLElement>('.tree-file.is-current') ?? null;
+        if (container === null || row === null) {
+            return;
+        }
+        const containerRect = container.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        const inside = rowRect.top >= containerRect.top && rowRect.bottom <= containerRect.bottom;
+        if (inside) {
+            return;
+        }
+        // scrollIntoView would also scroll the page's diff, so move only this list.
+        container.scrollTop +=
+            rowRect.top - containerRect.top - (container.clientHeight - rowRect.height) / 2;
+    }, [revealPath]);
 
     const viewedCount = files.filter(
         (entry) => viewedStatus(viewedFiles, entry.path, entry.hash) === 'viewed',
@@ -147,6 +205,7 @@ export function FileTree({
                             <button
                                 type="button"
                                 className="tree-file-row"
+                                aria-current={index === currentIndex ? 'true' : undefined}
                                 onClick={(event) => {
                                     const onCount =
                                         commentCount > 0 &&
@@ -210,7 +269,9 @@ export function FileTree({
                     </button>
                 ) : null}
             </div>
-            <div className="tree-scroll">{renderDir(tree, '', 0)}</div>
+            <div className="tree-scroll" ref={scrollRef}>
+                {renderDir(tree, '', 0)}
+            </div>
         </aside>
     );
 }

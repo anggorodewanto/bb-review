@@ -1119,6 +1119,7 @@ export function PRView() {
                     currentIndex={currentIndex}
                     comments={commentCountByPath}
                     viewedFiles={viewedFiles}
+                    visible={isMobile ? treeOpen : treeVisible}
                     onSelect={(index) => {
                         scrollToFile(index);
                         setTreeOpen(false);
