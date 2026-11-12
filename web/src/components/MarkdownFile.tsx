@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import type {ReactNode} from 'react';
 import {useQuery} from '@tanstack/react-query';
 import * as api from '../api';
@@ -11,6 +11,7 @@ import {
     sourceFileUrl,
 } from '../lib/markdown';
 import type {MarkdownBlock} from '../lib/markdown';
+import {hasMermaid, renderMermaidIn} from '../lib/mermaid';
 
 export type MarkdownContext = {
     ws: string;
@@ -33,6 +34,31 @@ function sideLine(item: NavItem, side: Side): number | null {
 
 function messageOf(error: unknown): string {
     return error instanceof Error ? error.message : 'Could not load the file';
+}
+
+/**
+ * One sanitized Markdown block. Mermaid diagrams are drawn after mount, so the
+ * ref is needed to swap the source `<pre>` for the generated SVG.
+ */
+function MarkdownBody({html}: {html: string}) {
+    const ref = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const element = ref.current;
+        if (!element || !hasMermaid(html)) {
+            return;
+        }
+        // The renderer bails out on its own once a block is no longer connected.
+        void renderMermaidIn(element);
+    }, [html]);
+
+    return (
+        <div
+            ref={ref}
+            className="markdown-body"
+            dangerouslySetInnerHTML={{__html: html}}
+        />
+    );
 }
 
 export function MarkdownFile({entry, context}: {entry: FileEntry; context: MarkdownContext}) {
@@ -117,10 +143,7 @@ export function MarkdownFile({entry, context}: {entry: FileEntry; context: Markd
                         ) : null}
                     </div>
                 ) : null}
-                <div
-                    className="markdown-body"
-                    dangerouslySetInnerHTML={{__html: block.html}}
-                />
+                <MarkdownBody html={block.html} />
             </section>
         );
     }

@@ -209,9 +209,31 @@ const x = 1;
         expect(html).toContain('x');
     });
 
-    it('renders mermaid and math as plain code/text', () => {
-        const html = render('\`\`\`mermaid\ngraph TD; A-->B;\n\`\`\`\n\nInline $x^2$ math.\n');
+    it('keeps mermaid blocks as escaped source for the diagram renderer', () => {
+        const html = render('\`\`\`mermaid\ngraph TD; A-->B;\n\`\`\`\n');
+        expect(html).toContain('<pre class="md-pre md-mermaid" data-mermaid="1">');
         expect(html).toContain('graph TD; A--&gt;B;');
+        // Mermaid source must not go through the highlighter.
+        expect(html).not.toContain('<span class="token');
+        expect(html).not.toContain('language-mermaid');
+    });
+
+    it('matches the mermaid fence case-insensitively', () => {
+        const html = render('\`\`\`Mermaid\nsequenceDiagram\n\`\`\`\n');
+        expect(html).toContain('data-mermaid="1"');
+        expect(html).toContain('sequenceDiagram');
+    });
+
+    it('keeps block spans unchanged around mermaid fences', () => {
+        expect(markdownBlockSpans('Intro\n\n\`\`\`mermaid\ngraph TD\n\`\`\`\n\nTail\n')).toEqual([
+            {startLine: 1, endLine: 1},
+            {startLine: 3, endLine: 5},
+            {startLine: 7, endLine: 7},
+        ]);
+    });
+
+    it('renders math as plain text', () => {
+        const html = render('Inline $x^2$ math.\n');
         expect(html).toContain('$x^2$');
     });
 

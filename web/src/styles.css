@@ -1354,6 +1354,22 @@ kbd {
     font-size: 12.5px;
 }
 
+.md-mermaid-diagram {
+    max-width: 100%;
+    margin: 0.9em 0;
+    overflow-x: auto;
+    text-align: center;
+}
+
+.md-mermaid-diagram svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.md-mermaid-error {
+    border-left: 3px solid var(--bad);
+}
+
 .md-file .markdown-body code {
     padding: 1px 4px;
     border-radius: 4px;

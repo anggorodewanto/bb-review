@@ -267,6 +267,10 @@ function createRenderer(options: MarkdownRenderOptions): Renderer {
 
     renderer.code = function (token: Tokens.Code): string {
         const language = (token.lang ?? '').trim().split(/\s+/)[0] ?? '';
+        if (language.toLowerCase() === 'mermaid') {
+            // Kept as plain source here; the diagram is drawn after mount.
+            return `<pre class="md-pre md-mermaid" data-mermaid="1"><code>${escapeHtml(token.text)}</code></pre>\n`;
+        }
         if (language && refractor.registered(language)) {
             const highlighted = hastToHtml(
                 refractor.highlight(token.text, language) as unknown as HastNode,
